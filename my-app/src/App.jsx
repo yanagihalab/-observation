@@ -7,6 +7,7 @@ import QrCodeDisplay from "./QrCodeDisplay";
 import PageList from "./PageList";
 import DescentForm from "./DescentForm";
 import IPFSUploadForm from "./IPFSUploadForm";
+import IPFSListPage from "./IPFSListPage";
 import SummitQRCode from "./SummitQRCode";
 import SummitForm from "./SummitForm";
 import ContractTestPage from './ContractTestPage.jsx';
@@ -21,6 +22,7 @@ function App() {
       <Route path="/qr-display" element={<QrCodeDisplay />} /> 
       <Route path="/descent-form" element={<DescentForm />} /> 
       <Route path="/ipfs-upload" element={<IPFSUploadForm />} />
+      <Route path="/ipfs-list" element={<IPFSListPage />} />
       <Route path="/summit-qr" element={<SummitQRCode walletAddress="ユーザーのアドレス" mountain="蓼科山" />} />
       <Route path="/summit-form" element={<SummitForm />} />
       <Route path="/contract-test" element={<ContractTestPage />} /> {/* コントラクトのテストページ */}

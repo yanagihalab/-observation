@@ -1,19 +1,19 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
-import jsQR from 'jsqr';
 import { useNavigate } from 'react-router-dom';
 
 function QrReaderPage() {
   const navigate = useNavigate();
-  const fileInputRef = useRef(null);
-  const canvasRef = useRef(null);
+  const [width, setWidth] = useState(500);
+  const [height, setHeight] = useState(500);
 
   useEffect(() => {
-    const scanner = new Html5QrcodeScanner('qr-camera-reader', {
-      fps: 10,
-      qrbox: 250
-    });
-
+    let h = document.documentElement.clientHeight - 124;
+    let w = Math.min(document.documentElement.clientWidth - 2, h - 120);
+    setWidth(w);
+    setHeight(h);
+    let b = w * 0.6;
+    const scanner = new Html5QrcodeScanner('qr-camera-reader', { fps: 10, qrbox: { width: b, height: b }, aspectRatio: 1.0, });
     scanner.render(
       (decodedText) => {
         scanner.clear();
@@ -32,51 +32,23 @@ function QrReaderPage() {
     navigate('/submit-form', { state: { qrInfo } });
   };
 
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = function () {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = canvasRef.current;
-        const context = canvas.getContext('2d');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        context.drawImage(img, 0, 0);
-
-        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
-
-        if (code) {
-          handleQrScanSuccess(code.data);
-        } else {
-          alert('QRコードを画像から読み取れませんでした。');
-        }
-      };
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  };
-
   return (
-    <div>
-      <h1>QRコード読み取りページ</h1>
-      <div>
-        <h2>📷 カメラからQRコード読み取り</h2>
-        <div id="qr-camera-reader" style={{ width: 500, height: 500 }}></div>
+    <div className="div_base">
+      <div className="div_header">QRコード読み取りページ</div>
+      <div className="div_content" style={{ overflow: "hidden" }}>
+        <div id="qr-camera-reader" style={{ width: width, height: height, margin: "0px auto" }}></div>
       </div>
-
-      <hr />
-
-      <div>
-        <h2>🖼️ PNG画像からQRコード読み取り</h2>
-        <input type="file" accept="image/png" ref={fileInputRef} onChange={handleFileChange} />
-        <canvas ref={canvasRef} style={{ display: 'none' }} />
+      <div style={{ height: "2px", backgroundColor: "#ABCE1C" }}></div>
+      <div style={{ height: "60px", display: "flex" }}>
+        <div className="div_footer" role="button" onClick={() => navigate('/qr-reader')}><i class="material-icons">qr_code_scanner</i></div>
+        <div style={{ width: "2px", backgroundColor: "#ABCE1C", margin: "10px 0px" }}></div>
+        <div className="div_footer" role="button" onClick={() => navigate('/ipfs-upload')}><i class="material-icons">upload_file</i></div>
+        <div style={{ width: "2px", backgroundColor: "#ABCE1C", margin: "10px 0px" }}></div>
+        <div className="div_footer" role="button" onClick={() => navigate('/ipfs-list')}><i class="material-icons">collections</i></div>
       </div>
     </div>
   );
 }
 
 export default QrReaderPage;
+

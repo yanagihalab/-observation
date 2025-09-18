@@ -1,3 +1,5 @@
+version: '3'
+
 services:
   vite-app:
     build: .
@@ -8,3 +10,5 @@ services:
       - /app/node_modules
     environment:
       NODE_ENV: development
+    command: npm run dev -- --host 0.0.0.0
+

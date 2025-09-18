@@ -13,6 +13,7 @@ function PageList() {
         <li><Link className="text-blue-500 hover:underline" to="/qr-display">QRコード表示ページ</Link></li>
         <><br /></>
         <li><Link to="/ipfs-upload">IPFS画像アップロード</Link></li>
+        <li><Link to="/ipfs-list">IPFS画像一覧ページ</Link></li>
         <li><Link to="/contract-test">コントラクトテストページ1</Link></li>
         <li><Link to="/all-contract-messages">コントラクトテストページ2</Link></li>
       </ul>
