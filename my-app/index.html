@@ -1,15 +1,28 @@
 <html lang="ja">
-
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
-  <title>Mt. Climbing</title>
-</head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
 
+  <!-- 既存：Material Icons 読み込み -->
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+
+  <!-- 追加：SVGファビコン（ルーペ×DNA） -->
+  <link rel="icon" type="image/svg+xml" href='data:image/svg+xml;utf8,
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34c759"/><stop offset="1" stop-color="#2f9e44"/>
+    </linearGradient></defs>
+    <circle cx="28" cy="28" r="16" fill="url(#g)"/>
+    <circle cx="28" cy="28" r="12" fill="white" opacity=".9"/>
+    <path d="M20 20c6 0 10 8 16 8M20 28c6 0 10-8 16-8M20 24c6 0 10 8 16 8M20 32c6 0 10-8 16-8"
+          stroke="#2b8a3e" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+    <rect x="38" y="38" width="6" height="16" rx="3" fill="#2b8a3e" transform="rotate(45 41 46)"/>
+  </svg>'>
+
+  <title>FloraLink</title>
+</head>
 <body>
   <div id="root" class="div_base"></div>
   <script type="module" src="/src/main.jsx"></script>
 </body>
-
 </html>

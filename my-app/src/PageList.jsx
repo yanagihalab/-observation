@@ -13,9 +13,13 @@ function PageList() {
         <li><Link className="text-blue-500 hover:underline" to="/qr-display">QRコード表示ページ</Link></li>
         <><br /></>
         <li><Link to="/ipfs-upload">IPFS画像アップロード</Link></li>
-        <li><Link to="/ipfs-list">IPFS画像一覧ページ</Link></li>
+        <li><Link to="/mint-nft">参加入場NFTの発行</Link></li>
+        <li><Link to="/ipfs-upload-mint">観察記録</Link></li>
         <li><Link to="/contract-test">コントラクトテストページ1</Link></li>
         <li><Link to="/all-contract-messages">コントラクトテストページ2</Link></li>
+        <li><Link to="/ClimbingInfoViewer">トランザクション確認</Link></li>
+        <li><Link to="/TestWalletGenerator">テストウォレットの作成</Link></li>
+        <li><Link to="/faucet">Fucet Page (蛇口をひねる)</Link></li>
       </ul>
     </div>
   );
