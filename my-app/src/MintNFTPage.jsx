@@ -3,17 +3,17 @@ import { useMemo, useRef, useState, useEffect } from "react";
 import { SigningCosmWasmClient } from "@cosmjs/cosmwasm-stargate";
 import { GasPrice } from "@cosmjs/stargate";
 
-/** 必要最小の環境設定（チェーン & 既定ガス & 既定アドレス） */
+/** 必要最小の環境設定 */
 const ENV = {
   VITE_CHAIN_ID: "pion-1",
   VITE_CHAIN_NAME: "Neutron Testnet (pion-1)",
-  // 正しいRPCに修正 + フォールバック候補は下で疎通確認して使用
   VITE_RPC: "https://rpc-palvus.pion-1.ntrn.tech",
   VITE_DENOM: "untrn",
   VITE_DENOM_DECIMALS: 6,
   VITE_BECH32_PREFIX: "neutron",
   VITE_GAS_PRICE: 0.025,
-  VITE_CW721_CONTRACT_ADDR: "/XXX/", // デプロイ後に差し替え
+  VITE_CW721_CONTRACT_ADDR:
+    "neutron1fd28n7fmpeaf0vcpm3xqjlc7htwajef75enj5zg0004peqy5xfrqtgachn",
 };
 
 const CHAIN_ID = ENV.VITE_CHAIN_ID;
@@ -22,20 +22,15 @@ const GAS_PRICE_NUM = Number(ENV.VITE_GAS_PRICE);
 const BECH32_PREFIX = ENV.VITE_BECH32_PREFIX;
 const DEFAULT_CONTRACT = ENV.VITE_CW721_CONTRACT_ADDR;
 
-// ===== 固定メタデータ（参照用・固定表示）=====
-const FIXED_MD_NAME = "Participation Certificate NFT";
-const FIXED_MD_DESC = "10042025深谷研菊地研合同イベント参加証NFT";
-const FIXED_MD_IMAGE =
-  "https://ipfs.yamada.jo.sus.ac.jp/ipfs/QmTuDCtiZJjRFqiZ6D5X2iNX8ejwNu6Kv1F7EcThej9yHu";
+/** 固定メタデータ（参照用・cw721フォールバック時の token_uri に使用） */
+const FIXED_METADATA_URI_HTTP =
+  "https://ipfs.yamada.jo.sus.ac.jp/ipfs/QmTGDRGPFtX5QZhiwk2gUBzs9CaBmrFEMEuKn29G7saBfx";
 
-// 既にアップロード済みの metadata.json の URI が分かっているなら下に設定（空でもOK）
-const METADATA_URI_FIXED = "";
-
-// Public RPC 候補（最初に応答したURLを使用）
+/** RPC 候補（最初に応答したURLを使用） */
 const RPC_CANDIDATES = [
   ENV.VITE_RPC,
   "https://neutron-testnet-rpc.polkachu.com:443",
-  "https://rpc.pion.remedy.tm.p2p.org",
+  "https://rpc-palvus.pion-1.ntrn.tech:443",
 ];
 
 async function firstReachable(urls) {
@@ -43,11 +38,12 @@ async function firstReachable(urls) {
     try {
       const r = await fetch(`${u}/health`, { method: "GET" });
       if (r.ok) return u;
-    } catch (_e) {}
+    } catch {}
   }
   throw new Error("到達可能なRPCが見つかりませんでした");
 }
 
+/** token_id（cw721フォールバック用） */
 function nowTokenId() {
   const d = new Date();
   const y = d.getUTCFullYear();
@@ -60,22 +56,7 @@ function nowTokenId() {
   return `ticket-${y}${m}${da}-${h}${mi}${s}-${rand}`;
 }
 
-/** http(s) gateway → ipfs:// に変換 */
-function httpGatewayToIpfsScheme(url) {
-  if (!url) return "";
-  try {
-    const u = new URL(url);
-    const m = u.pathname.match(/\/(?:ipfs|IPFS)\/([^/?#]+)(.*)?/);
-    if (m) {
-      const cid = m[1];
-      const rest = m[2] || "";
-      return `ipfs://${cid}${rest}`;
-    }
-  } catch (e) {}
-  return url; // そのまま使う
-}
-
-/** ipfs:// → 取得用 http(s) URL へ変換（ipfs.io） */
+/** ipfs:// → 表示用 http(s) へ変換（ipfs.io） */
 function tokenUriToFetchUrl(uri) {
   if (!uri) return "";
   if (uri.startsWith("ipfs://")) {
@@ -85,95 +66,62 @@ function tokenUriToFetchUrl(uri) {
   return uri;
 }
 
-/** ざっくりCID/URIチェック（ipfs:// 付き/無しの両方許可、CIDv0/v1想定） */
-function normalizeTokenUriFromCid(input) {
-  const s = (input || "").trim();
-  if (!s) return "";
-  if (s.startsWith("ipfs://")) return s;
-  if (/^https?:\/\//i.test(s)) return httpGatewayToIpfsScheme(s); // gateway URL → ipfs://
-  if (/^[a-zA-Z0-9=_-]{32,}$/.test(s)) return `ipfs://${s}`; // 素のCID
-  return "";
-}
-
-/** QR文字列の汎用パーサ */
-function parseQrContent(text) {
-  if (!text) return {};
-  const raw = text.trim();
-
-  // 1) JSON 形式の可能性
-  if (raw.startsWith("{") || raw.startsWith("[")) {
-    try {
-      const obj = JSON.parse(raw);
-      return obj && typeof obj === "object" ? obj : {};
-    } catch (e) {}
-  }
-
-  // 2) URL 形式（nft:?cid=... / https://.../ipfs/<cid> など）
-  try {
-    const u = new URL(raw);
-    const params = u.searchParams;
-    const o = {};
-    for (const [k, v] of params.entries()) o[k] = v;
-    if (u.protocol.startsWith("ipfs")) o.cid = u.href;
-    const m = u.pathname.match(/\/(?:ipfs|IPFS)\/([^/?#]+)/);
-    if (!o.cid && m) o.cid = `ipfs://${m[1]}`;
-    if (params.get("token_uri")) o.token_uri = params.get("token_uri");
-    return o;
-  } catch {
-    // 3) 素の CID / ipfs:// / gateway URL とみなす
-    return { cid: raw };
-  }
-}
-
-/** 読み取ったJSONが NFT メタデータらしいか簡易判定 */
-function looksLikeMetadata(obj) {
-  if (!obj || typeof obj !== "object") return false;
-  if ("name" in obj || "image" in obj || "attributes" in obj) return true;
-  return false;
-}
-
 export default function MintNFTPage() {
+  // 共通状態
+  const [message, setMessage] = useState("");
+  const [contractAddr, setContractAddr] = useState(DEFAULT_CONTRACT);
+
+  // 固定メタデータ（末尾セクション）
+  const [fixedMd, setFixedMd] = useState(null);
+  const [fixedMdLoading, setFixedMdLoading] = useState(false);
+  const [fixedMdError, setFixedMdError] = useState("");
+
+  // ウォレットモード: 'keplr' | 'testwallet'
+  const [walletMode, setWalletMode] = useState("keplr"); // 既定はKeplr
+
+  // Keplr用
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [owner, setOwner] = useState("");
-  const [contractAddr, setContractAddr] = useState(DEFAULT_CONTRACT);
-  const [message, setMessage] = useState("");
+  const [owner, setOwner] = useState(""); // Keplr接続時に自動取得
   const [minting, setMinting] = useState(false);
   const [txHash, setTxHash] = useState("");
-
-  // token_id は QR で上書きされる想定（UI編集は不要）
-  const [tokenId, setTokenId] = useState(nowTokenId());
-
-  // token_uri（= metadata.json の場所）
-  const [metadataUri, setMetadataUri] = useState(
-    METADATA_URI_FIXED ? normalizeTokenUriFromCid(METADATA_URI_FIXED) : ""
-  );
-
-  // コントラクト状態
   const [price, setPrice] = useState(null); // { denom, amount }
-  const [cfg, setCfg] = useState(null);     // { public_mint_enabled, ... }
-  const [preferredKind, setPreferredKind] = useState("public_mint");
-
+  const [cfg, setCfg] = useState(null);
   const clientRef = useRef(null);
   const [rpcInUse, setRpcInUse] = useState("");
 
-  // 追加メタデータ（on-chain extension として送る）
-  const [extraAttrs, setExtraAttrs] = useState([{ trait_type: "", value: "" }]);
-  const [extraNote, setExtraNote] = useState("");
+  // TestWallet用（CLI生成）
+  const [twOwner, setTwOwner] = useState(""); // 例: neutron1...
+  const [twKeyName, setTwKeyName] = useState("testwallet");
+  const [twNode, setTwNode] = useState(ENV.VITE_RPC);
+  const [twTokenId, setTwTokenId] = useState(nowTokenId()); // cw721用
 
-  // 読取メタデータのプレビュー
-  const [remoteMd, setRemoteMd] = useState(null);
-  const [remoteMdLoading, setRemoteMdLoading] = useState(false);
-  const [remoteMdError, setRemoteMdError] = useState("");
-
-  // スクロール有効化（他CSSの overflow: hidden を無効化）
+  // 固定メタデータ取得
   useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "auto";
-    return () => { document.body.style.overflow = prev; };
+    let abort = false;
+    (async () => {
+      try {
+        setFixedMdLoading(true);
+        setFixedMdError("");
+        const r = await fetch(FIXED_METADATA_URI_HTTP, { method: "GET" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        if (!abort) setFixedMd(j);
+      } catch (e) {
+        if (!abort) {
+          setFixedMd(null);
+          setFixedMdError(String(e?.message || e));
+        }
+      } finally {
+        if (!abort) setFixedMdLoading(false);
+      }
+    })();
+    return () => {
+      abort = true;
+    };
   }, []);
 
-  // ========== Keplr 接続 ==========
+  // Keplr接続
   const connectKeplr = async () => {
     try {
       setConnecting(true);
@@ -186,10 +134,10 @@ export default function MintNFTPage() {
       const offlineSigner = await window.keplr.getOfflineSignerAuto(CHAIN_ID);
       const [{ address }] = await offlineSigner.getAccounts();
 
-      const client = await SigningCosmWasmClient.connectWithSigner(
-        rpcUrl, offlineSigner,
-        { gasPrice: GasPrice.fromString(`${GAS_PRICE_NUM}${DENOM}`), prefix: BECH32_PREFIX }
-      );
+      const client = await SigningCosmWasmClient.connectWithSigner(rpcUrl, offlineSigner, {
+        gasPrice: GasPrice.fromString(`${GAS_PRICE_NUM}${DENOM}`),
+        prefix: BECH32_PREFIX,
+      });
 
       clientRef.current = client;
       setOwner(address);
@@ -219,164 +167,8 @@ export default function MintNFTPage() {
     }
   };
 
-  // ========== QR スキャン ==========
-  const qrFileRef = useRef(null);
-  const scannerRef = useRef(null);
-  const [scanning, setScanning] = useState(false);
-  const [lastQrText, setLastQrText] = useState("");
-
-  async function startScan() {
-    try {
-      const { Html5Qrcode } = await import("html5-qrcode");
-      const cams = await Html5Qrcode.getCameras();
-      if (!cams || cams.length === 0) throw new Error("カメラが見つかりません。HTTPS または localhost でアクセスしてください。");
-      const camId = cams[0].id;
-
-      const qr = new Html5Qrcode("qr-reader");
-      scannerRef.current = qr;
-      setScanning(true);
-
-      await qr.start(
-        camId,
-        { fps: 10, qrbox: { width: 240, height: 240 } },
-        (decodedText) => {
-          onQrDecoded(decodedText);
-          stopScan(); // 1回で停止
-        },
-        (_err) => {}
-      );
-    } catch (e) {
-      setMessage(e?.message || String(e));
-    }
-  }
-
-  async function stopScan() {
-    try {
-      const qr = scannerRef.current;
-      if (qr) {
-        await qr.stop();
-        await qr.clear();
-        scannerRef.current = null;
-      }
-    } catch (e) {}
-    setScanning(false);
-  }
-
-  useEffect(() => () => { stopScan(); }, []);
-
-  async function scanFromFile(file) {
-    if (!file) return;
-    try {
-      const { Html5Qrcode } = await import("html5-qrcode");
-      const qr = new Html5Qrcode("qr-reader-file");
-      const text = await qr.scanFile(file, true);
-      await qr.clear();
-      onQrDecoded(text);
-    } catch (e) {
-      setMessage(e?.message || String(e));
-    }
-  }
-
-  function onQrDecoded(text) {
-    try {
-      setLastQrText(text);
-
-      // ① JSON そのものがmetadataの可能性
-      if ((text || "").trim().startsWith("{")) {
-        try {
-          const obj = JSON.parse(text);
-          if (looksLikeMetadata(obj)) {
-            setRemoteMd(obj);
-          }
-          // JSON内に token_uri があれば優先
-          if (typeof obj.token_uri === "string") {
-            const uri = normalizeTokenUriFromCid(obj.token_uri);
-            if (uri) setMetadataUri(uri);
-          }
-        } catch (e) {
-          /* noop: 下で通常パス */
-        }
-      }
-
-      // ② 通常パス（cid / token_uri を抽出）
-      const parsed = parseQrContent(text);
-      if (parsed.token_uri) {
-        const uri = normalizeTokenUriFromCid(parsed.token_uri);
-        if (uri) setMetadataUri(uri);
-      } else if (parsed.cid) {
-        const uri = normalizeTokenUriFromCid(parsed.cid);
-        if (uri) setMetadataUri(uri);
-      } else if (METADATA_URI_FIXED && !metadataUri) {
-        setMetadataUri(normalizeTokenUriFromCid(METADATA_URI_FIXED));
-      }
-
-      if (parsed.token_id) setTokenId(String(parsed.token_id));
-      if (parsed.contract) setContractAddr(String(parsed.contract));
-      if (parsed.kind && (parsed.kind === "public_mint" || parsed.kind === "mint")) {
-        setPreferredKind(parsed.kind);
-      }
-      if (parsed.owner && !owner) setOwner(String(parsed.owner));
-
-      setMessage("QRコードを読み取りました。内容を反映しています。");
-
-      // 読み取り後、読取メタデータへスクロール
-      const anchor = document.getElementById("scanned-metadata-anchor");
-      if (anchor) anchor.scrollIntoView({ behavior: "smooth", block: "start" });
-    } catch (e) {
-      setMessage(e?.message || String(e));
-    }
-  }
-
-  // ========== metadataUri がセットされたら metadata.json を取得して表示 ==========
-  useEffect(() => {
-    let abort = false;
-    async function run() {
-      if (!metadataUri) { setRemoteMd(null); return; }
-      try {
-        setRemoteMdLoading(true);
-        setRemoteMdError("");
-        const url = tokenUriToFetchUrl(metadataUri);
-        const r = await fetch(url, { method: "GET" });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = await r.json();
-        if (!abort) setRemoteMd(j);
-      } catch (e) {
-        if (!abort) {
-          setRemoteMd(null);
-          setRemoteMdError(String(e?.message || e));
-        }
-      } finally {
-        if (!abort) setRemoteMdLoading(false);
-      }
-    }
-    run();
-    return () => { abort = true; };
-  }, [metadataUri]);
-
-  // ========== on-chain extension（追記） ==========
-  const addAttrRow = () => setExtraAttrs((prev) => [...prev, { trait_type: "", value: "" }]);
-  const removeAttrRow = (i) => setExtraAttrs((prev) => prev.filter((_, idx) => idx !== i));
-  const updateAttrRow = (i, key, val) =>
-    setExtraAttrs((prev) => prev.map((a, idx) => (idx === i ? { ...a, [key]: val } : a)));
-
-  function buildOnchainExtension() {
-    const attrs = extraAttrs
-      .filter((a) => (a.trait_type || "").trim() || (a.value || "").trim())
-      .map((a) => ({ trait_type: (a.trait_type || "").trim(), value: (a.value || "").trim() }));
-
-    if (extraNote.trim()) attrs.push({ trait_type: "Note", value: extraNote.trim() });
-
-    const ext = {
-      name: FIXED_MD_NAME,
-      description: FIXED_MD_DESC,
-      image: FIXED_MD_IMAGE,
-    };
-    if (attrs.length) ext.attributes = attrs;
-    return ext;
-  }
-
-  // ========== ミント（extension をTXに同梱。未対応なら自動フォールバック） ==========
-  const handleMint = async () => {
+  // Keplr実行：public_mint({}) → （スキーマ不一致時のみ）cw721.mint に自動フォールバック
+  const handleMintKeplr = async () => {
     try {
       setMinting(true);
       setMessage("");
@@ -386,54 +178,42 @@ export default function MintNFTPage() {
       if (!owner) throw new Error("Owner が未設定です。");
       if (!contractAddr || contractAddr === "/XXX/") throw new Error("コントラクトアドレスが未設定です。");
 
-      const token_uri = normalizeTokenUriFromCid(metadataUri);
-      if (!token_uri) throw new Error("メタデータURI/CIDが不正です（例: ipfs://bafy... または https://.../ipfs/<cid>/...）");
-
-      const client = clientRef.current;
-
-      // 価格設定がある場合のみ funds を付ける（基本はフリーミント）
       let funds = undefined;
       if (price?.denom && String(price?.amount) !== "0") {
         funds = [{ amount: String(price.amount), denom: String(price.denom) }];
       }
 
-      const extension = buildOnchainExtension();
+      const client = clientRef.current;
 
-      const execOnce = async (kind, withExtension) => {
-        const base = { token_id: tokenId, owner, token_uri };
-        const payload = withExtension ? { ...base, extension } : base;
-        const msg = kind === "mint" ? { mint: payload } : { public_mint: payload };
-        return client.execute(owner, contractAddr, msg, "auto", `ticket mint ${tokenId}`, funds);
-      };
-
-      let res;
+      // 1) まず public_mint（引数なし）を試行
       try {
-        res = await execOnce(preferredKind, true);
+        const msg = { public_mint: {} };
+        const res = await client.execute(owner, contractAddr, msg, "auto", "ticket public_mint", funds);
+        setTxHash(res?.transactionHash || res?.hash || "");
+        setMessage("入場券NFTのミントが完了しました。（public_mint）");
+        return;
       } catch (e1) {
-        const t = String(e1?.message || e1);
-        const noExtSupport =
-          /unknown field.*extension|extra field.*extension|did not match any variant|no such variant|invalid type|invalid data/i.test(t);
-        if (!noExtSupport) throw e1;
-
-        try {
-          res = await execOnce(preferredKind, false);
-        } catch (e2) {
-          const methodMissing =
-            /unknown variant|no such variant|did not match any variant|found no variant|no variant named/i.test(
-              String(e2?.message || e2)
-            );
-          if (!methodMissing) throw e2;
-          const fallbackKind = preferredKind === "public_mint" ? "mint" : "public_mint";
-          res = await execOnce(fallbackKind, false);
-        }
+        const t1 = String(e1?.message || e1);
+        // public_mint が存在しない/不一致なら cw721.mint にフォールバック
+        const schemaErr = /unknown variant|no such variant|did not match any variant|found no variant/i.test(t1);
+        if (!schemaErr) throw e1;
       }
 
-      setTxHash(res?.transactionHash || res?.hash || "");
-      setMessage("入場券NFTのミントが完了しました。");
-
-      // 次のIDを用意（連続ミント用）
-      setTokenId(nowTokenId());
-      setLastQrText("");
+      // 2) cw721.mint にフォールバック（token_id / token_uri 必須）
+      const fallbackTokenId = nowTokenId();
+      const cw721Msg = {
+        cw721: {
+          mint: {
+            token_id: fallbackTokenId,
+            owner, // Keplrの送信者と同一でOK
+            token_uri: FIXED_METADATA_URI_HTTP,
+            extension: {},
+          },
+        },
+      };
+      const res2 = await client.execute(owner, contractAddr, cw721Msg, "auto", `ticket cw721.mint ${fallbackTokenId}`, funds);
+      setTxHash(res2?.transactionHash || res2?.hash || "");
+      setMessage("入場券NFTのミントが完了しました。（cw721.mint フォールバック）");
     } catch (e) {
       console.error(e);
       const t = String(e?.message || e);
@@ -449,9 +229,64 @@ export default function MintNFTPage() {
     }
   };
 
-  const priceLabel = useMemo(() => (price?.denom ? `${price.amount} ${price.denom}` : "無料（0）"), [price]);
+  const priceLabel = useMemo(
+    () => (price?.denom ? `${price.amount} ${price.denom}` : "無料（0）"),
+    [price]
+  );
 
-  // ===== スクロールできるラッパー（iOS/モバイル対応）=====
+  // Raw JSON のプレビュー（先頭 N 行だけ表示）
+  const jsonPreview = (obj, headLines = 14) => {
+    try {
+      const s = JSON.stringify(obj ?? {}, null, 2);
+      const lines = s.split("\n");
+      const head = lines.slice(0, headLines).join("\n");
+      const tail = lines.slice(headLines).join("\n");
+      return { head, tail };
+    } catch {
+      return { head: "", tail: "" };
+    }
+  };
+
+  // TestWallet用: neutrond コマンド生成（public_mint {} / cw721.mint）
+  const buildTwCmd = (kind) => {
+    const base = {
+      contract: contractAddr || "<CONTRACT_ADDR>",
+      owner: twOwner || "<OWNER_ADDR>",
+      node: twNode || ENV.VITE_RPC,
+      key: twKeyName || "testwallet",
+      token_id: twTokenId,
+      token_uri: FIXED_METADATA_URI_HTTP,
+    };
+
+    // public_mint は引数なし
+    const msg =
+      kind === "cw721"
+        ? `{"cw721":{"mint":{"token_id":"${base.token_id}","owner":"${base.owner}","token_uri":"${base.token_uri}","extension":{}}}}`
+        : `{"public_mint":{}}`;
+
+    // cw721.mint は --from のアドレスと owner を一致させるのが無難です
+    return [
+      "neutrond tx wasm execute",
+      base.contract,
+      `'${msg}'`,
+      `--from ${base.key}`,
+      "--gas auto --gas-prices 0.025untrn --gas-adjustment 1.5",
+      `--chain-id ${CHAIN_ID}`,
+      `--node ${base.node}`,
+      "-y",
+    ].join(" ");
+  };
+
+  const copy = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage("コマンドをクリップボードにコピーしました。");
+    } catch {
+      setMessage("コピーに失敗しました。手動で選択してコピーしてください。");
+    }
+  };
+
+  // レイアウト
   const PAGE_WRAP = {
     minHeight: "100dvh",
     overflowY: "auto",
@@ -459,217 +294,231 @@ export default function MintNFTPage() {
     overscrollBehaviorY: "contain",
   };
 
+  const TabBtn = ({ active, onClick, children }) => (
+    <button
+      onClick={onClick}
+      style={{
+        padding: "8px 12px",
+        borderRadius: 8,
+        border: active ? "1px solid #111" : "1px solid #ddd",
+        background: active ? "#111" : "#fff",
+        color: active ? "#fff" : "#111",
+        fontWeight: 600,
+      }}
+    >
+      {children}
+    </button>
+  );
+
   return (
     <div style={PAGE_WRAP}>
-      <div style={{ maxWidth: 780, margin: "0 auto", padding: 16 }}>
-        <h2>入場券NFT — QR読取り → 読取メタデータ表示 →（拡張）TX同梱フリーミント</h2>
+      <div style={{ maxWidth: 820, margin: "0 auto", padding: 16 }}>
+        <h2>入場券NFT — フリーミント</h2>
 
-        {/* QR 読取り（最上段） */}
+        {/* ==== モード切替（Keplr / TestWallet） ==== */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <TabBtn active={walletMode === "keplr"} onClick={() => setWalletMode("keplr")}>Keplr で実行</TabBtn>
+          <TabBtn active={walletMode === "testwallet"} onClick={() => setWalletMode("testwallet")}>TestWallet（CLI）</TabBtn>
+        </div>
+
+        {/* ==== 共通: コントラクト ==== */}
         <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>QRコード読取り（カメラ）</div>
-          <div id="qr-reader" style={{ width: 280, height: 280, background: "#fafafa", borderRadius: 8, maxWidth: "100%" }} />
-          {/* ファイル読み取り用（scanFileは要素IDが必要） */}
-          <div id="qr-reader-file" style={{ display: "none" }} />
-          <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            {!scanning ? <button onClick={startScan}>カメラを開始</button> : <button onClick={stopScan}>停止</button>}
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              画像から読む:
-              <input ref={qrFileRef} type="file" accept="image/*" onChange={(e) => scanFromFile(e.target.files?.[0])} />
-            </label>
-          </div>
-          {lastQrText && (
-            <div style={{ marginTop: 8, fontSize: 12, color: "#555", wordBreak: "break-all" }}>
-              直近のQR内容: <code>{lastQrText}</code>
-            </div>
-          )}
-        </div>
-
-        {/* 読取メタデータ（QRから得た token_uri をfetch した内容を表示） */}
-        <div id="scanned-metadata-anchor" />
-        <div style={{ border: "1px solid #cfe3ff", borderRadius: 8, padding: 12, marginBottom: 12, background: "#f6faff" }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>読取メタデータ（プレビュー）</div>
-          {!metadataUri && !remoteMd && (
-            <div style={{ fontSize: 13, color: "#777" }}>まだ token_uri / metadata.json が読み込まれていません。</div>
-          )}
-          {metadataUri && (
-            <div style={{ fontSize: 13, marginBottom: 8 }}>
-              token_uri:{" "}
-              <a href={tokenUriToFetchUrl(metadataUri)} target="_blank" rel="noreferrer">
-                {metadataUri}
-              </a>
-            </div>
-          )}
-          {remoteMdLoading && <div style={{ fontSize: 13 }}>読み込み中…</div>}
-          {remoteMdError && <div style={{ fontSize: 13, color: "#b00020" }}>取得エラー: {remoteMdError}</div>}
-          {remoteMd && (
-            <div style={{ display: "grid", gap: 8 }}>
-              {"name" in remoteMd && <div><b>name:</b> {String(remoteMd.name)}</div>}
-              {"description" in remoteMd && <div><b>description:</b> {String(remoteMd.description)}</div>}
-              {"external_url" in remoteMd && (
-                <div><b>external_url:</b> <a href={String(remoteMd.external_url)} target="_blank" rel="noreferrer">{String(remoteMd.external_url)}</a></div>
-              )}
-              {"image" in remoteMd && (
-                <div>
-                  <b>image:</b>{" "}
-                  <a href={tokenUriToFetchUrl(String(remoteMd.image))} target="_blank" rel="noreferrer">
-                    {String(remoteMd.image)}
-                  </a>
-                  <div style={{ marginTop: 6 }}>
-                    <img
-                      src={tokenUriToFetchUrl(String(remoteMd.image))}
-                      alt="metadata image"
-                      style={{ maxWidth: "100%", height: "auto", borderRadius: 8 }}
-                    />
-                  </div>
-                </div>
-              )}
-              {"animation_url" in remoteMd && (
-                <div>
-                  <b>animation_url:</b>{" "}
-                  <a href={tokenUriToFetchUrl(String(remoteMd.animation_url))} target="_blank" rel="noreferrer">
-                    {String(remoteMd.animation_url)}
-                  </a>
-                </div>
-              )}
-              {"attributes" in remoteMd && Array.isArray(remoteMd.attributes) && (
-                <div>
-                  <b>attributes:</b>
-                  <ul style={{ margin: "6px 0 0 18px" }}>
-                    {remoteMd.attributes.map((a, i) => (
-                      <li key={i} style={{ fontSize: 13 }}>
-                        {a?.trait_type ? <b>{a.trait_type}:</b> : <b>(no trait):</b>} {String(a?.value ?? "")}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              <div>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>Raw JSON</div>
-                <pre style={{ background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, padding: 8, whiteSpace: "pre-wrap" }}>
-{JSON.stringify(remoteMd, null, 2)}
-                </pre>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* 固定メタデータ（参照用） */}
-        <div id="fixed-metadata-anchor" />
-        <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginBottom: 12, background: "#fafafa" }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>固定メタデータ（参照用）</div>
-          <div style={{ fontSize: 14, lineHeight: 1.6 }}>
-            <div><b>name:</b> {FIXED_MD_NAME}</div>
-            <div><b>description:</b> {FIXED_MD_DESC}</div>
-            <div><b>image:</b> <a href={FIXED_MD_IMAGE} target="_blank" rel="noreferrer">{FIXED_MD_IMAGE}</a></div>
-          </div>
-        </div>
-
-        {/* 固定 image のプレビュー */}
-        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>固定 image プレビュー</div>
-          <img src={FIXED_MD_IMAGE} alt="fixed metadata image" style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 8 }} />
-        </div>
-
-        {/* 追加メタデータ（on-chain extension としてTX同梱／任意） */}
-        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>追加メタデータ（TXに同梱 — IPFSへは保存しません）</div>
-
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ fontSize: 12, color: "#666" }}>
-              ここで入力した内容は <code>extension</code> としてミントTXに同梱され、チェーン上に記録されます。
-            </div>
-            <button type="button" onClick={() => setExtraAttrs((prev) => [...prev, { trait_type: "", value: "" }])}>行を追加</button>
-          </div>
-
-          {extraAttrs.map((a, idx) => (
-            <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, marginTop: 8 }}>
-              <input
-                placeholder="trait_type（例: Seat）"
-                value={a.trait_type}
-                onChange={(e) => setExtraAttrs(prev => prev.map((x,i)=> i===idx? {...x, trait_type: e.target.value}: x))}
-              />
-              <input
-                placeholder="value（例: A-12）"
-                value={a.value}
-                onChange={(e) => setExtraAttrs(prev => prev.map((x,i)=> i===idx? {...x, value: e.target.value}: x))}
-              />
-              <button type="button" onClick={() => setExtraAttrs(prev => prev.filter((_,i)=> i!==idx))}>削除</button>
-            </div>
-          ))}
-
-          <div style={{ marginTop: 8 }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>備考（Note, 任意）</div>
-            <textarea
-              rows={3}
-              placeholder="表示上の補足や注意事項などを記述できます。"
-              value={extraNote}
-              onChange={(e) => setExtraNote(e.target.value)}
-              style={{ width: "100%" }}
-            />
-          </div>
-
-          {/* 送信前プレビュー */}
-          <div style={{ marginTop: 8 }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>送信プレビュー（extension）</div>
-            <pre style={{ background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, padding: 8, whiteSpace: "pre-wrap" }}>
-{JSON.stringify((() => {
-  const attrs = extraAttrs
-    .filter(a => (a.trait_type || "").trim() || (a.value || "").trim())
-    .map(a => ({ trait_type: (a.trait_type || "").trim(), value: (a.value || "").trim() }));
-  if (extraNote.trim()) attrs.push({ trait_type: "Note", value: extraNote.trim() });
-  const ext = { name: FIXED_MD_NAME, description: FIXED_MD_DESC, image: FIXED_MD_IMAGE };
-  if (attrs.length) ext.attributes = attrs;
-  return ext;
-})(), null, 2)}
-            </pre>
-          </div>
-        </div>
-
-        {/* ウォレット & コントラクト（実行ボタンの直前） */}
-        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>ウォレット & コントラクト</div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <button disabled={connecting} onClick={connectKeplr}>{connected ? "再接続" : "Keplrに接続"}</button>
-            <div style={{ fontSize: 13, color: "#666" }}>
-              Chain: {CHAIN_ID}{rpcInUse ? `  RPC: ${rpcInUse}` : ""}
-            </div>
-          </div>
-          <div style={{ marginTop: 8, fontSize: 13 }}>
-            Owner:
-            <input style={{ width: "100%" }} value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="あなたのアドレス" />
-          </div>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>コントラクト設定</div>
           <div style={{ marginTop: 8, fontSize: 13 }}>
             コントラクトアドレス:
-            <div style={{ display: "flex", gap: 8 }}>
-              <input style={{ flex: 1 }} value={contractAddr} onChange={(e) => setContractAddr(e.target.value)} placeholder="/XXX/" />
-              <button
-                onClick={async () => {
-                  if (clientRef.current && contractAddr && contractAddr !== "/XXX/") {
-                    await refreshState(clientRef.current, contractAddr);
-                    setMessage("コントラクト状態を更新しました。");
-                  }
-                }}
-              >状態更新</button>
-            </div>
+            <input
+              style={{ width: "100%" }}
+              value={contractAddr}
+              onChange={(e) => setContractAddr(e.target.value)}
+              placeholder="/XXX/"
+            />
           </div>
-          <div style={{ marginTop: 8, fontSize: 12, color: "#555" }}>
-            手数料: {priceLabel}
+          <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
+            既定は <code>public_mint({})</code> を利用します。非対応の場合は自動で <code>cw721.mint</code> を使用します。
           </div>
         </div>
 
-        {/* 実行 */}
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button disabled={minting || !connected || !metadataUri} onClick={handleMint}>
-            {minting ? "ミント中…" : "フリーミントを実行"}
-          </button>
-          {txHash && <code style={{ fontSize: 12 }}>tx: {txHash}</code>}
-        </div>
+        {/* ==== Keplr モード ==== */}
+        {walletMode === "keplr" && (
+          <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>ウォレット & コントラクト（Keplr）</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <button disabled={connecting} onClick={connectKeplr}>{connected ? "再接続" : "Keplrに接続"}</button>
+              <div style={{ fontSize: 13, color: "#666" }}>
+                Chain: {CHAIN_ID}{rpcInUse ? `  RPC: ${rpcInUse}` : ""}
+              </div>
+            </div>
+            <div style={{ marginTop: 8, fontSize: 13 }}>
+              Owner (接続後に自動入力可):
+              <input
+                style={{ width: "100%" }}
+                value={owner}
+                onChange={(e) => setOwner(e.target.value)}
+                placeholder="あなたのアドレス"
+              />
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: "#555" }}>
+              手数料: {priceLabel}
+              {contractAddr && contractAddr !== "/XXX/" && (
+                <button
+                  style={{ marginLeft: 8 }}
+                  onClick={async () => {
+                    if (clientRef.current) {
+                      await refreshState(clientRef.current, contractAddr);
+                      setMessage("コントラクト状態を更新しました。");
+                    }
+                  }}
+                >
+                  状態更新
+                </button>
+              )}
+            </div>
+
+            {/* 実行（Keplr） */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
+              <button disabled={minting || !connected} onClick={handleMintKeplr}>
+                {minting ? "ミント中…" : "フリーミントを実行"}
+              </button>
+              {txHash && (
+              <a
+                href={`${EXPLORER_TX_BASE}${encodeURIComponent(txHash)}`}
+                target="_blank"
+                rel="noreferrer"
+                style={{ fontSize: 12, textDecoration: "underline" }}
+                title="Mintscan で確認"
+              >
+                tx: {txHash}
+              </a>
+            )}
+            </div>
+          </div>
+        )}
+
+        {/* ==== TestWallet モード（CLIコマンド生成） ==== */}
+        {walletMode === "testwallet" && (
+          <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>TestWallet（neutrond CLI で実行）</div>
+            <div style={{ display: "grid", gap: 8 }}>
+              <label style={{ fontSize: 13 }}>
+                Owner アドレス（neutron1...）:
+                <input style={{ width: "100%" }} value={twOwner} onChange={(e) => setTwOwner(e.target.value)} placeholder="neutron1..." />
+              </label>
+              <label style={{ fontSize: 13 }}>
+                --from のキー名:
+                <input style={{ width: "100%" }} value={twKeyName} onChange={(e) => setTwKeyName(e.target.value)} placeholder="testwallet" />
+              </label>
+              <label style={{ fontSize: 13 }}>
+                --node:
+                <input style={{ width: "100%" }} value={twNode} onChange={(e) => setTwNode(e.target.value)} placeholder={ENV.VITE_RPC} />
+              </label>
+              <label style={{ fontSize: 13 }}>
+                token_id（cw721.mint用）:
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input style={{ width: "100%" }} value={twTokenId} onChange={(e) => setTwTokenId(e.target.value)} />
+                  <button onClick={() => setTwTokenId(nowTokenId())}>再生成</button>
+                </div>
+              </label>
+            </div>
+
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>public_mint（推奨）</div>
+              <pre style={{ background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, padding: 8, whiteSpace: "pre-wrap" }}>
+{buildTwCmd("public")}
+              </pre>
+              <button onClick={() => copy(buildTwCmd("public"))}>コピー</button>
+            </div>
+
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>cw721.mint（public_mint非対応時）</div>
+              <pre style={{ background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, padding: 8, whiteSpace: "pre-wrap" }}>
+{buildTwCmd("cw721")}
+              </pre>
+              <button onClick={() => copy(buildTwCmd("cw721"))}>コピー</button>
+            </div>
+          </div>
+        )}
 
         {message && (
           <div style={{ marginTop: 10, padding: 10, border: "1px solid #ABCE1C", background: "#f3f7ea", borderRadius: 6 }}>
             {message}
           </div>
         )}
+
+        {/* ====================== 最後のセクション ====================== */}
+        <div id="fixed-metadata-anchor" style={{ marginTop: 20 }} />
+        <section style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginTop: 20, background: "#fafafa" }}>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>固定メタデータ（参照用）</div>
+
+          {fixedMdLoading && <div style={{ fontSize: 13 }}>読み込み中…</div>}
+          {fixedMdError && <div style={{ fontSize: 13, color: "#b00020" }}>取得エラー: {fixedMdError}</div>}
+
+          {fixedMd && (
+            <>
+              <div style={{ fontSize: 14, lineHeight: 1.6 }}>
+                {"name" in fixedMd && <div><b>name:</b> {String(fixedMd.name)}</div>}
+                {"description" in fixedMd && <div><b>description:</b> {String(fixedMd.description)}</div>}
+                {"image" in fixedMd && (
+                  <div style={{ marginTop: 4 }}>
+                    <b>image:</b>{" "}
+                    <a href={tokenUriToFetchUrl(String(fixedMd.image))} target="_blank" rel="noreferrer">
+                      {String(fixedMd.image)}
+                    </a>
+                  </div>
+                )}
+                {"attributes" in fixedMd && Array.isArray(fixedMd.attributes) && (
+                  <div style={{ marginTop: 6 }}>
+                    <b>attributes:</b>
+                    <ul style={{ margin: "6px 0 0 18px" }}>
+                      {fixedMd.attributes.map((a, i) => (
+                        <li key={i} style={{ fontSize: 13 }}>
+                          {a?.trait_type ? <b>{a.trait_type}:</b> : <b>(no trait):</b>} {String(a?.value ?? "")}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+
+              {/* 固定 image プレビュー */}
+              <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginTop: 12 }}>
+                <div style={{ fontWeight: 600, marginBottom: 8 }}>固定 image プレビュー</div>
+                {fixedMd?.image ? (
+                  <img
+                    src={tokenUriToFetchUrl(String(fixedMd.image))}
+                    alt="fixed metadata image"
+                    style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 8 }}
+                  />
+                ) : (
+                  <div style={{ fontSize: 13, color: "#777" }}>固定メタデータの image が未取得です。</div>
+                )}
+              </div>
+
+              {/* Raw JSON（先頭だけプレビュー + 折りたたみ） */}
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Raw JSON（プレビュー＋折りたたみ）</div>
+                {(() => {
+                  const { head, tail } = jsonPreview(fixedMd, 14);
+                  return (
+                    <div>
+                      <pre style={{ background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, padding: 8, whiteSpace: "pre-wrap" }}>
+{head}
+                      </pre>
+                      {tail && tail.trim() && (
+                        <details>
+                          <summary style={{ cursor: "pointer" }}>残りを表示</summary>
+                          <pre style={{ background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, padding: 8, whiteSpace: "pre-wrap", marginTop: 8 }}>
+{tail}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            </>
+          )}
+        </section>
+        {/* ==================== /最後のセクション ==================== */}
       </div>
     </div>
   );

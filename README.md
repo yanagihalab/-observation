@@ -178,6 +178,15 @@ docker run --rm -it \
 ls -lh artifacts/
 # => artifacts/cw721_public_mint.wasm
 ```
+```bash Cargo.lockがおかしいとき
+docker run --rm \
+  --entrypoint /bin/sh \
+  -v "$PWD":/code -w /code \
+  --mount type=volume,source="$(basename "$(pwd)")_cache",target=/code/target \
+  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
+  cosmwasm/optimizer:0.17.0 \
+  -c 'set -e; if [ -f Cargo.lock ]; then cargo update -w; else cargo generate-lockfile; fi; /usr/local/bin/optimize.sh /code'
+```
 
 ---
 
@@ -189,43 +198,118 @@ ls -lh artifacts/
 neutrond tx wasm store artifacts/cw721_public_mint.wasm \
   --from <KEY> --chain-id pion-1 \
   --gas auto --gas-adjustment 1.3 --gas-prices 0.025untrn -y
+
+neutrond tx wasm store artifacts/Participation_Certificate_NFT.wasm \
+--from <KEY_NAME> \
+--chain-id pion-1 \
+--node https://rpc-palvus.pion-1.ntrn.tech:443 \
+--gas-prices 0.025untrn --gas auto --gas-adjustment 1.5 \
+-y -b block
+
+
+admin-y@LAPTOP-GQE54E1E:~/tmp/observation/flora_observation$ RPC=https://rpc-palvus.pion-1.ntrn.tech:443
+CHAIN_ID=pion-1
+KEY=tatatata
+KR=os      # ← 環境に合わせて os / file / test のいずれか
+admin-y@LAPTOP-GQE54E1E:~/tmp/observation/flora_observation$ TXH=$(neutrond tx wasm store artifacts/flora_observation.wasm \
+  --from "$KEY" --keyring-backend "$KR" \
+  --chain-id "$CHAIN_ID" --node "$RPC" \
+  --gas-prices 0.025untrn --gas auto --gas-adjustment 1.5 \
+  -y -b sync -o json | jq -r '.txhash')
+echo "store tx: $TXH"
+Enter keyring passphrase (attempt 1/3):
+gas estimate: 2794182
+store tx: 4C8CC3B44732CA85E86E5A5891FB4A88B76D86D46AC477262518775D6B4D6217
 # → CODE_ID を控える
 ```
 
-### instantiate（観察記録用：例）
-
 ```bash
-neutrond tx wasm instantiate <CODE_ID> '{
-  "name": "Observation NFT",
-  "symbol": "OBS",
-  "admin": "<ADMIN_ADDR>",
-  "public_mint_enabled": true,
-  "mint_fee_denom": "",
-  "mint_fee_amount": "0",
-  "max_per_address": 1,
-  "max_supply": 0,
-  "transfer_locked": false,
+admin-y@LAPTOP-GQE54E1E:~/tmp/observation/public_mint$ ADDR="neutron1urqaxdn4qtrc35zqrw84qkqvawx3ga34j3gjflzm0yp59vta4gqq62jjea"
+RPC="https://neutron-testnet-rpc.polkachu.com:443"
 
-  "mint_start": 0,
-  "mint_end": 0,
-  "base_uri": null,
-  "placeholder_uri": "ipfs://QmPlaceholder/metadata.json",
-  "revealed": false,
-  "provenance_hash": null,
-  "fee_recipient": null
-}' --label obs-nft \
-  --from <KEY> --chain-id pion-1 \
-  --gas auto --gas-adjustment 1.3 --gas-prices 0.025untrn -y
-# 返ってきた contract_address → <OBS_CONTRACT>
+# code_id を確認
+neutrond q wasm contract "$ADDR" --node "$RPC" -o json | jq -r '.contract_info.code_id // .code_id'
+13162
+
+TX=950C378FD9697FAF34452AD526DABED6877A32F2F18E2E2763531768B346CB24
+CHAIN_ID=pion-1
+NODE=https://rpc-palvus.pion-1.ntrn.tech:443
+
+# 収録までポーリング（成功したらJSONを出力）
+while :; do
+  out=$(neutrond query tx "$TX" --chain-id "$CHAIN_ID" --node "$NODE" -o json 2>/dev/null || true)
+  if [ -n "$out" ] && jq -e '.txhash != null' >/dev/null 2>&1 <<<"$out"; then
+    code=$(jq -r '.code // 0' <<<"$out")
+    if [ "$code" = "0" ]; then
+      echo "$out" | jq .
+      break
+    elif [ "$code" != "0" ]; then
+      echo "❌ TX failed (code=$code)"
+      echo "$out" | jq -r '.raw_log'
+      exit 1
+    fi
+  fi
+  sleep 2
+done
+```
+### instantiate（観察記録用：例）
+13,164
+```bash
+admin-y@LAPTOP-GQE54E1E:~/tmp/observation/public_mint$ ADMIN=$(neutrond keys show tatatata -a)
+INIT='{"name":"ParticipationCert","symbol":"PCN","max_supply":null}'
+
+neutrond tx wasm instantiate 13164 "$INIT" \
+  --label "cw721-free-mint" \
+  --admin "$ADMIN" \
+  --from tatatata \
+  --gas auto --gas-adjustment 1.5 --gas-prices 0.025untrn \
+  --broadcast-mode sync -y -o json \
+  --chain-id pion-1 --node https://rpc-palvus.pion-1.ntrn.tech:443
+Enter keyring passphrase (attempt 1/3):
+Enter keyring passphrase (attempt 1/3):
+gas estimate: 304632
+{"height":"0","txhash":"08DE5F65EE2BA7950CA8DAF0ED92646DBA0F8FE80635E88C8811577D2E2660E8","codespace":"","code":0,"data":"","raw_log":"","logs":[],"info":"","gas_wanted":"0","gas_used":"0","tx":null,"timestamp":"","events":[]}
+```
+2) contract_address を抽出（両方のイベント名に対応）
+```bash
+ CODE_ID=13164  # 先ほどの正しい Code ID
+neutrond query wasm list-contracts-by-code "$CODE_ID" --node "$NODE" -o json \
+  | jq -r '.contracts[-1]'
+neutron1fd28n7fmpeaf0vcpm3xqjlc7htwajef75enj5zg0004peqy5xfrqtgachn
 ```
 
+3) 最小クエリで動作確認
+```
+# id=1 を試しに取得（未保存なら null が返る想定）
+neutrond query wasm contract-state smart "$ADDR" '{"get":{"id":1}}' \
+  --node "$RPC" -o json | jq
+```
+3) 動作確認（フリーミント → 所有トークン照会）
+```bash
+WALLET=tatatata
+
+# ミント
+neutrond tx wasm execute "neutron1fd28n7fmpeaf0vcpm3xqjlc7htwajef75enj5zg0004peqy5xfrqtgachn" '{"public_mint":{}}' \
+  --from "tatatata" \
+  --gas auto --gas-adjustment 1.5 --gas-prices 0.025untrn \
+  --broadcast-mode sync -y -o json \
+  --chain-id "13164" --node "$NODE" \
+| jq -r '.txhash' \
+| xargs -I{} neutrond query tx {} --chain-id "$CHAIN_ID" --node "$NODE" -o json | jq .code,.raw_log
+
+# 所有トークンを確認
+OWNER=$(neutrond keys show "$WALLET" -a)
+neutrond query wasm contract-state smart "$CONTRACT_ADDR" \
+  "$(jq -nc --arg owner "$OWNER" '{tokens:{owner:$owner,start_after:null,limit:50}}')" \
+  --chain-id "$CHAIN_ID" --node "$NODE" -o json | jq
+```
 ### instantiate（入場券用：例）
 
 ```bash
-neutrond tx wasm instantiate <CODE_ID> '{
+neutrond tx wasm instantiate 13164 '{
   "name": "Admission Ticket",
   "symbol": "TICKET",
-  "admin": "<ADMIN_ADDR>",
+  "admin": "tatatata",
   "public_mint_enabled": true,
   "mint_fee_denom": "",
   "mint_fee_amount": "0",
@@ -241,7 +325,7 @@ neutrond tx wasm instantiate <CODE_ID> '{
   "provenance_hash": null,
   "fee_recipient": null
 }' --label ticket-nft \
-  --from <KEY> --chain-id pion-1 \
+  --from tatatata --chain-id pion-1 \
   --gas auto --gas-adjustment 1.3 --gas-prices 0.025untrn -y
 # 返ってきた contract_address → <TICKET_CONTRACT>
 ```
@@ -250,7 +334,7 @@ neutrond tx wasm instantiate <CODE_ID> '{
 > `/ipfs-upload-mint` → `<OBS_CONTRACT>`
 > `/mint-nft` → `<TICKET_CONTRACT>`
 > をそれぞれ設定（または固定）してください。
-
+"neutron1g2fs6jn6kfvl3exlz9dfewr2ap39cys505y23q7pkczdh06tyu6qr7qqx3"
 ---
 
 ## 4. メッセージ仕様

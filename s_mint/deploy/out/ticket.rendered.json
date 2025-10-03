@@ -1,0 +1,19 @@
+{
+  "name": "Admission Ticket",
+  "symbol": "TICKET",
+  "admin": "neutron1ahx6kfl8x9ay8p09k7jgltkywatm8qvxfrguvd",
+  "public_mint_enabled": true,
+  "mint_fee_denom": "",
+  "mint_fee_amount": "0",
+  "max_per_address": 1,
+  "max_supply": 1000,
+  "transfer_locked": false,
+
+  "mint_start": 0,
+  "mint_end": 0,
+  "base_uri": null,
+  "placeholder_uri": null,
+  "revealed": true,
+  "provenance_hash": null,
+  "fee_recipient": null
+}

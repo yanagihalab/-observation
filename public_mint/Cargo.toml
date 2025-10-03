@@ -1,44 +1,28 @@
 [package]
-name = "cw721_public_mint"
+name = "participation-certificate-nft"
 version = "0.1.0"
 edition = "2021"
+resolver = "2"
 license = "Apache-2.0"
-repository = "https://example.com/your-repo"
-description = "CW721 public mint wrapper with optional mint fee for Neutron (pion-1)."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# リリースビルドのサイズ削減用のダミー。必要なら使ってください
-backtraces = []
+# 追加 feature が必要ならここに記載
 
 [dependencies]
-# CosmWasm core
-cosmwasm-std = "1.5.11"
-cosmwasm-schema = "1.5.11"
+cosmwasm-schema  = "1.5"
+cosmwasm-std     = "1.5"
+# ← ここが肝: Item/Map は cw_storage_plus から
+cw-storage-plus  = "1.2"
+schemars         = "0.8"
+serde            = { version = "1.0", features = ["derive"] }
+thiserror        = "1.0"
 
-# Storage
-cw-storage-plus = "1.2.0"
-
-# Helpers
-cw2 = "1.1.2"
-
-# Ownership helper（必要に応じて使う）
-cw-ownable = "0.5.1"
-
-# CW721
-cw721 = "0.18.0"
-cw721-base = { version = "0.18.0", default-features = false, features = ["library"] }
-
-# serde / schemars / error handling
-serde = { version = "1.0", features = ["derive"] }
-schemars = "0.8.22"
-thiserror = "1.0"
-
-# （必要なら）旧 cosmwasm-storage を消して構いません。cw-storage-plus があればOK
-# cosmwasm-storage = "1.5.2"
+cw2              = "1.1.2"
+cw721            = "0.18.0"
+cw721-base       = { version = "0.18.0", features = ["library"] }
 
 [dev-dependencies]
-cosmwasm-vm = "1.5.11"
-cosmwasm-schema = "1.5.11"
+cosmwasm-schema = "1.5"

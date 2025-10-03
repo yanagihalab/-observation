@@ -1,0 +1,15 @@
+{
+  "name": "Participation Certificate NFT",
+  "description": "Participation certificate NFT for the Fukaya Lab & Kikuchi Lab joint event on 2025-10-04.",
+  "image": "https://ipfs.yamada.jo.sus.ac.jp/ipfs/QmTuDCtiZJjRFqiZ6D5X2iNX8ejwNu6Kv1F7EcThej9yHu",
+  "attributes": [
+    { "trait_type": "Certificate Type", "value": "Participation" },
+    { "trait_type": "Event Name", "value": "Fukaya Lab × Kikuchi Lab Joint Event" },
+    { "trait_type": "Event Date", "value": "2025-10-04" },
+    { "trait_type": "Organizer", "value": "Fukaya Laboratory / Kikuchi Laboratory" },
+    { "trait_type": "Location", "value": "Pension Harmony / 36.2426°N, 138.2278°E / https://www.p-harmony.net/" },
+    { "trait_type": "Language", "value": "ja" },
+    { "trait_type": "Issuance", "value": "One-per-address" },
+    { "trait_type": "Network", "value": "Neutron Testnet (pion-1)" }
+  ]
+}

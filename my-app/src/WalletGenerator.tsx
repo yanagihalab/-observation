@@ -35,7 +35,7 @@ const prefersReducedMotion =
     ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
     : false;
 
-export default function WalletGenerator() {
+export default function WalletGeneratorJP() {
   // チェーン選択 & 詳細設定トグル
   const [chainKey, setChainKey] = useState(DEFAULT_CHAIN_KEY);
   const [advanced, setAdvanced] = useState(false);
@@ -52,6 +52,7 @@ export default function WalletGenerator() {
 
   // UI 状態
   const [showMnemonic, setShowMnemonic] = useState(false);
+  const [askedRevealConfirm, setAskedRevealConfirm] = useState(false); // 初回のみ確認
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false); // .json 保存できたら完了
@@ -99,10 +100,15 @@ export default function WalletGenerator() {
     }
   }
 
+  function validatePath(p) {
+    try { stringToPath(p); return true; } catch { return false; }
+  }
+
   async function generateWallet() {
     setBusy(true);
     setError("");
     try {
+      if (!validatePath(hdPath)) throw new Error("HD Path が不正です (例: m/44'/118'/0'/0/0)");
       const path = stringToPath(hdPath);
       const wallet = await DirectSecp256k1HdWallet.generate(Number(wordCount), {
         prefix,
@@ -114,6 +120,7 @@ export default function WalletGenerator() {
       setAddress(acc.address);
       setPubkeyHex(acc.pubkey ? toHex(acc.pubkey) : "");
       setShowMnemonic(false);
+      setAskedRevealConfirm(false);
       setDone(false); // 新規生成時は完了フラグを戻す
     } catch (e) {
       console.error(e);
@@ -129,6 +136,7 @@ export default function WalletGenerator() {
     try {
       await navigator.clipboard.writeText(text);
       toast("コピーしました");
+      try { navigator.vibrate?.(10); } catch {}
     } catch {
       try {
         const ta = document.createElement("textarea");
@@ -183,7 +191,7 @@ export default function WalletGenerator() {
         a.click();
         document.body.removeChild(a);
       } catch (err) {
-        alert(".txt の保存に失敗しました。別ブラウザ/HTTPSでお試しください。");
+        alert(".txt / .json の保存に失敗しました。別ブラウザ/HTTPSでお試しください。");
         console.error(err);
       }
     }
@@ -191,12 +199,7 @@ export default function WalletGenerator() {
 
   function downloadMnemonicTxt() {
     if (!mnemonic) return;
-    const body = `# CosmJS mnemonic (DO NOT SHARE) / 絶対に共有しないでください
-# prefix=${prefix}
-# path=${hdPath}
-
-${mnemonic}
-`;
+    const body = `# CosmJS mnemonic (DO NOT SHARE) / 絶対に共有しないでください\n# prefix=${prefix}\n# path=${hdPath}\n\n${mnemonic}\n`;
     download("cosmos_mnemonic.txt", body);
   }
 
@@ -245,6 +248,7 @@ ${mnemonic}
       ? "保存しました。ファイルAppに保存されているか確認してください。"
       : "保存しました。ダウンロードフォルダを確認してください。"
     );
+    try { navigator.vibrate?.(15); } catch {}
   }
 
   function resetAll() {
@@ -254,6 +258,7 @@ ${mnemonic}
     setPassword("");
     setPassword2("");
     setShowMnemonic(false);
+    setAskedRevealConfirm(false);
     setError("");
     setDone(false);
   }
@@ -303,13 +308,22 @@ ${mnemonic}
                 <p className="text-sm mt-1">
                   keystore <code>.json</code> を保存しました。復元にはこのファイルとパスワードが必要です。
                 </p>
-                <button
-                  onClick={() => { resetAll(); }}
-                  className="mt-3 inline-flex items-center gap-2 rounded-2xl bg-slate-800 hover:bg-slate-700 px-4 py-3 text-base font-medium"
-                  style={{ touchAction: "manipulation" }}
-                >
-                  もう一度作る / Make another
-                </button>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => { resetAll(); }}
+                    className="inline-flex items-center gap-2 rounded-2xl bg-slate-800 hover:bg-slate-700 px-4 py-3 text-base font-medium"
+                    style={{ touchAction: "manipulation" }}
+                  >
+                    もう一度作る / Make another
+                  </button>
+                  <a
+                    href="/test-wallet"
+                    className="inline-flex items-center gap-2 rounded-2xl bg-cyan-600 hover:bg-cyan-500 px-4 py-3 text-base font-medium"
+                    style={{ touchAction: "manipulation" }}
+                  >
+                    テストページへ / Go to Test Page
+                  </a>
+                </div>
               </div>
             </div>
           )}
@@ -360,7 +374,7 @@ ${mnemonic}
                 disabled={!advanced || done}
                 className="w-full text-base rounded-xl bg-slate-800 border border-slate-700 px-3 py-3 outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-60"
                 placeholder="neutron"
-                autoComplete="off" autoCorrect="off" spellCheck={false}
+                autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false}
               />
               {!advanced && (
                 <p className="mt-1 text-xs text-slate-400">通常は変更不要（Neutron は neutron）。</p>
@@ -391,7 +405,7 @@ ${mnemonic}
                 disabled={!advanced || done}
                 className="w-full text-base rounded-xl bg-slate-800 border border-slate-700 px-3 py-3 outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-60"
                 placeholder="m/44'/118'/0'/0/0"
-                autoComplete="off" autoCorrect="off" spellCheck={false}
+                autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false}
               />
               {!advanced && (
                 <p className="mt-1 text-xs text-slate-400">
@@ -434,7 +448,14 @@ ${mnemonic}
               <div className="flex items-center justify-between mb-2">
                 <h3 className="font-semibold text-slate-200">Mnemonic（BIP39 ニーモニック）</h3>
                 <button
-                  onClick={() => setShowMnemonic((s) => !s)}
+                  onClick={() => {
+                    if (!showMnemonic && !askedRevealConfirm) {
+                      const ok = window.confirm("本当に表示しますか？周囲に人がいないことを確認してください / Reveal mnemonic?");
+                      if (!ok) return;
+                      setAskedRevealConfirm(true);
+                    }
+                    setShowMnemonic((s) => !s);
+                  }}
                   disabled={!mnemonic || done}
                   className="inline-flex items-center gap-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-60 px-3 py-2"
                   title={showMnemonic ? "Hide / 隠す" : "Reveal / 表示"}
@@ -503,7 +524,7 @@ ${mnemonic}
                     disabled={done}
                     placeholder="Password (8+ chars)（8文字以上）"
                     className="w-full text-base pr-10 rounded-xl bg-slate-800 border border-slate-700 px-3 py-3 outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-60"
-                    autoComplete="new-password"
+                    autoComplete="new-password" autoCorrect="off" autoCapitalize="none" spellCheck={false}
                   />
                   <button
                     type="button"
@@ -523,7 +544,7 @@ ${mnemonic}
                     disabled={done}
                     placeholder="Confirm Password（確認）"
                     className="w-full text-base pr-10 rounded-xl bg-slate-800 border border-slate-700 px-3 py-3 outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-60"
-                    autoComplete="new-password"
+                    autoComplete="new-password" autoCorrect="off" autoCapitalize="none" spellCheck={false}
                   />
                   <button
                     type="button"

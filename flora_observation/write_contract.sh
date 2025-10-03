@@ -1,3 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ===== Cargo.toml を上書き（CosmWasm 1.5 系 & cw721-base 0.18.0 対応）=====
+cat > Cargo.toml <<'TOML'
+[package]
+name = "participation-certificate-nft"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# 追加 feature が必要ならここに記載
+
+[dependencies]
+cosmwasm-schema  = "1.5"
+cosmwasm-std     = "1.5"
+# ← ここが肝: Item/Map は cw_storage_plus から
+cw-storage-plus  = "1.2"
+schemars         = "0.8"
+serde            = { version = "1.0", features = ["derive"] }
+thiserror        = "1.0"
+
+cw2              = "1.1.2"
+cw721            = "0.18.0"
+cw721-base       = { version = "0.18.0", features = ["library"] }
+
+[dev-dependencies]
+cosmwasm-schema = "1.5"
+TOML
+
+mkdir -p src
+
+# ===== src/error.rs =====
+cat > src/error.rs <<'RS'
+use cosmwasm_std::StdError;
+use thiserror::Error;
+
+#[derive(Error, Debug, PartialEq)]
+pub enum ContractError {
+    #[error("Std error: {0}")]
+    Std(#[from] StdError),
+
+    #[error("cw721 error: {0}")]
+    Cw721(#[from] cw721_base::ContractError),
+
+    #[error("Max supply reached")]
+    MaxSupplyReached,
+
+    #[error("Already minted one per address")]
+    AlreadyMinted,
+}
+RS
+
+# ===== src/state.rs（cw_storage_plus を使用）=====
+cat > src/state.rs <<'RS'
+use cosmwasm_schema::cw_serde;
+use cosmwasm_std::Addr;
+use cw_storage_plus::{Item, Map};
+
+#[cw_serde]
+pub struct Config {
+    pub admin: Addr,
+    pub next_token_id: u64,
+    pub max_supply: Option<u64>,
+}
+
+pub const CONFIG: Item<Config> = Item::new("config");
+pub const MINTED: Item<u64> = Item::new("minted");
+pub const MINTED_BY: Map<&Addr, bool> = Map::new("minted_by");
+RS
+
+# ===== src/msg.rs（ExecuteMsg のジェネリクスを <Empty, Empty> に）=====
+cat > src/msg.rs <<'RS'
+use cosmwasm_schema::cw_serde;
+use cosmwasm_std::Empty;
+
+// Query は cw721-base の QueryMsg をそのまま採用（ジェネリク1つ）
+pub type QueryMsg = cw721_base::msg::QueryMsg<Empty>;
+
+#[cw_serde]
+pub struct InstantiateMsg {
+    pub name: String,
+    pub symbol: String,
+    /// 最大供給量（省略時は無制限）
+    pub max_supply: Option<u64>,
+}
+
+#[cw_serde]
+pub enum ExecuteMsg {
+    /// フリーミント
+    PublicMint {},
+    /// 標準 CW721 実行の委譲（TransferNft / SendNft / Burn / Approve ...）
+    Cw721(cw721_base::msg::ExecuteMsg<Empty, Empty>),
+}
+RS
+
+# ===== src/lib.rs（Cw721Contract::default() 使用、Mint は構造体バリアント、to_json_binary へ）=====
+cat > src/lib.rs <<'RS'
 #![allow(unused_imports)]
 
 use cosmwasm_std::{
@@ -34,7 +137,7 @@ const USE_NUMBERED_JSON: bool = false;   // ← 固定 JSON を使う
 // ------------------------------
 #[entry_point]
 pub fn instantiate(
-    mut deps: DepsMut,  // ← branch() を使うため mut
+    mut deps: DepsMut,  // ← ここを mut に修正
     env: Env,
     info: MessageInfo,
     msg: InstantiateMsg,
@@ -48,6 +151,7 @@ pub fn instantiate(
         minter: env.contract.address.to_string(), // ← 自分自身をミンターに
     };
 
+    // ★ Cw721Contract は default() でOK（'static ライフタイム）
     let cw721 = Cw721Contract::<Empty, Empty, Empty, Empty>::default();
     cw721.instantiate(deps.branch(), env.clone(), info.clone(), cw721_init)?;
 
@@ -78,18 +182,14 @@ pub fn execute(
     match msg {
         ExecuteMsg::PublicMint {} => exec_public_mint(deps, env, info),
         ExecuteMsg::Cw721(inner) => {
-            // 標準 CW721 実行をそのまま委譲（Transfer/Burn/Approveなど）
+            // 標準 CW721 実行をそのまま委譲
             let cw721 = Cw721Contract::<Empty, Empty, Empty, Empty>::default();
             cw721.execute(deps, env, info, inner).map_err(ContractError::from)
         }
     }
 }
 
-fn exec_public_mint(
-    mut deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-) -> Result<Response, ContractError> {
+fn exec_public_mint(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, ContractError> {
     let mut cfg = CONFIG.load(deps.storage)?;
 
     // 1アドレス1枚: 既にミント済みなら拒否
@@ -117,34 +217,31 @@ fn exec_public_mint(
         Some(FIXED_URI.to_string())
     };
 
-    // ---- ここが重要：ライブラリ実行を直接呼ぶ（自分宛の WasmMsg は使わない）----
-    // ミンターはコントラクト自身なので、sender を contract address にして合成
+    // cw721-base の Mint（minter は本コントラクト自身）
+    // ※ ExecuteMsg は 2 ジェネリクス（T, E）
     let mint_msg: cw721_msg::ExecuteMsg<Empty, Empty> = cw721_msg::ExecuteMsg::Mint {
         token_id: token_id.to_string(),
         owner: info.sender.to_string(),
         token_uri,
         extension: Empty {},
     };
-    let mint_info = MessageInfo {
-        sender: env.contract.address.clone(),
+
+    let sub = WasmMsg::Execute {
+        contract_addr: env.contract.address.to_string(),
+        msg: to_json_binary(&mint_msg)?,
         funds: vec![],
     };
-    let cw721 = Cw721Contract::<Empty, Empty, Empty, Empty>::default();
-    let mut resp = cw721
-        .execute(deps.branch(), env.clone(), mint_info, mint_msg)
-        .map_err(ContractError::from)?; // ← ここでミント実施
 
     // ミントカウンタ更新 & フラグ
     let minted_now = MINTED.load(deps.storage)?.saturating_add(1);
     MINTED.save(deps.storage, &minted_now)?;
     MINTED_BY.save(deps.storage, &info.sender, &true)?;
 
-    resp = resp
+    Ok(Response::new()
+        .add_message(sub)
         .add_attribute("action", "public_mint")
         .add_attribute("to", info.sender)
-        .add_attribute("token_id", token_id.to_string());
-
-    Ok(resp)
+        .add_attribute("token_id", token_id.to_string()))
 }
 
 // ------------------------------
@@ -155,12 +252,6 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     let cw721 = Cw721Contract::<Empty, Empty, Empty, Empty>::default();
     cw721.query(deps, env, msg)
 }
+RS
 
-// ------------------------------
-// (任意) migrate: 将来の修正をアドレスを変えずに反映可能
-// ------------------------------
-#[entry_point]
-pub fn migrate(deps: DepsMut, _env: Env, _msg: Empty) -> Result<Response, ContractError> {
-    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    Ok(Response::new().add_attribute("action", "migrate"))
-}
+echo "✅ Fixed sources written: Cargo.toml + src/{lib.rs,msg.rs,error.rs,state.rs}"

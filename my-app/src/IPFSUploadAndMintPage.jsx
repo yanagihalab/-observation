@@ -1,71 +1,56 @@
+// src/IPFSUploadAndMintPage.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { SigningCosmWasmClient } from "@cosmjs/cosmwasm-stargate";
-import { GasPrice } from "@cosmjs/stargate";
+import { GasPrice, calculateFee } from "@cosmjs/stargate";
+import { toUtf8 } from "@cosmjs/encoding";
 
 /**
- * 更新点（2025-09-29）
- * - 画像 / メタデータのアップロードを Azure Functions のエンドポイント
- *     https://fukaya-lab.azurewebsites.net/api/ipfs/upload
- *   に統一。Payload は { Name, ContentType, Data(base64) }。
- * - 旧 FormData 方式を撤去。Pinata 関連もなし。
- * - 応答の CID 抽出は複数フィールド（cid/hash/IpfsHash/path 等）に対応。
+ * 画像 → IPFS(Azure Functions) → CID を取得し、
+ * { store: { payload: {...}, cid } } を execute。
+ * - コントラクトアドレスは固定（Mintscan リンク付き）
+ * - 画像アップロードは DEV: /ipfs-upload → 失敗時 Azure直 / 本番: Azure直
+ * - application/json 失敗時は text/plain で再試行（CORS/Preflight回避）
+ * - payload.extras は「既存更新ではなく要素の追加」
+ * - place は任意（緯度/経度が空または不正なら送信に含めない）
+ * - ページ最下部に最終メタデータ（payload / store msg）を表示
+ * - TxHash は Mintscan（neutron-testnet）リンクで表示
+ * - スクロールロックの付け外し（cameraOpen に連動）
  */
 
-/** ← .env を使わず、ここでハードコード定義（指定どおり保持。ただし Pinata は撤去） */
 const ENV = {
-  VITE_CHAIN_ID: "pion-1",
-  VITE_CHAIN_NAME: "Neutron Testnet (pion-1)",
-  VITE_RPC: "https://rpc-palvus.pion-1.ntrn.tech",
-  VITE_REST: "https://rest-palvus.pion-1.ntrn.tech",
-  VITE_DENOM: "untrn",
-  VITE_DENOM_DECIMALS: 6,
-  VITE_DISPLAY_DENOM: "NTRN",
-  VITE_BECH32_PREFIX: "neutron",
-
-  VITE_GAS_PRICE: 0.025,
-
-  VITE_CW721_CONTRACT_ADDR: "/XXX/",
-
-  VITE_MINT_FEE_AMOUNT: 0,
-  VITE_MINT_FEE_DENOM: "",
-
-  VITE_MINT_MSG_KIND: "public_mint", // or "mint"
-
-  VITE_IPFS_PUBLIC_GATEWAY: "https://ipfs.io/ipfs/",
-  VITE_TX_EXPLORER_BASE: "https://neutron.celat.one/pion-1/txs/",
-
-  // 自前バックエンド → Azure Functions のアップローダに差し替え
-  // cURL 例：
-  // curl -X POST -H "Content-Type: application/json" \
-  //   -d '{"Name":"test2.json","ContentType":"application/json","Data":"...base64..."}' \
-  //   https://fukaya-lab.azurewebsites.net/api/ipfs/upload
-  VITE_CUSTOM_UPLOAD_ENDPOINT: "https://fukaya-lab.azurewebsites.net/api/ipfs/upload",
+  CHAIN_ID: "pion-1",
+  CHAIN_NAME: "Neutron Testnet (pion-1)",
+  DENOM: "untrn",
+  DENOM_DECIMALS: 6,
+  DISPLAY_DENOM: "NTRN",
+  BECH32_PREFIX: "neutron",
+  GAS_PRICE: 0.025,      // --gas-prices 0.025untrn
+  GAS_ADJUSTMENT: 1.5,   // --gas-adjustment 1.5
+  // ★ 固定コントラクト
+  CONTRACT_ADDR: "neutron1n0h44yyn6lhswspgvgwn4nzak6q8aj5qx0vaj95k2n0pl4zlcv8qcwzcc3",
+  // Azure Functions（必要に応じて ?code=... を付与可）
+  CUSTOM_UPLOAD_ENDPOINT: "https://fukaya-lab.azurewebsites.net/api/ipfs/upload",
 };
 
-// ↓ 以降はこの ENV から値を参照
-const CHAIN_ID = ENV.VITE_CHAIN_ID;
-const CHAIN_NAME = ENV.VITE_CHAIN_NAME;
-const RPC = ENV.VITE_RPC;
-const REST = ENV.VITE_REST;
-const DENOM = ENV.VITE_DENOM;
-const DECIMALS = Number(ENV.VITE_DENOM_DECIMALS);
-const DISPLAY_DENOM = ENV.VITE_DISPLAY_DENOM;
-const BECH32_PREFIX = ENV.VITE_BECH32_PREFIX;
-const GAS_PRICE_NUM = Number(ENV.VITE_GAS_PRICE);
-const CW721_CONTRACT_DEFAULT = ENV.VITE_CW721_CONTRACT_ADDR;
+// 参照定数
+const CHAIN_ID = ENV.CHAIN_ID;
+const CHAIN_NAME = ENV.CHAIN_NAME;
+const DENOM = ENV.DENOM;
+const DECIMALS = Number(ENV.DENOM_DECIMALS);
+const DISPLAY_DENOM = ENV.DISPLAY_DENOM;
+const BECH32_PREFIX = ENV.BECH32_PREFIX;
+const GAS_PRICE_NUM = Number(ENV.GAS_PRICE);
+const GAS_ADJ = Number(ENV.GAS_ADJUSTMENT);
+const CONTRACT_ADDR = ENV.CONTRACT_ADDR;
 
-const CUSTOM_UPLOAD_ENDPOINT = ENV.VITE_CUSTOM_UPLOAD_ENDPOINT;
+// Mintscan（固定リンク）
+const CONTRACT_EXPLORER_URL =
+  `https://www.mintscan.io/neutron-testnet/address/${CONTRACT_ADDR}`;
+const TX_EXPLORER_BASE = "https://www.mintscan.io/neutron-testnet/txs/";
+const formatTxLink = (h) => (h ? `${TX_EXPLORER_BASE}${h}` : "");
 
-const IPFS_GATEWAY = ENV.VITE_IPFS_PUBLIC_GATEWAY;
-
-const ENV_FEE_AMOUNT = String(ENV.VITE_MINT_FEE_AMOUNT ?? "0");
-const ENV_FEE_DENOM = ENV.VITE_MINT_FEE_DENOM || "";
-
-const TX_EXPLORER_BASE = ENV.VITE_TX_EXPLORER_BASE || "";
-const MINT_MSG_KIND = ENV.VITE_MINT_MSG_KIND || "public_mint";
-
-// Candidate public endpoints (RPC/REST) for Neutron testnet (pion-1)
+// RPC/REST 候補
 const RPC_CANDIDATES = [
   "https://rpc-palvus.pion-1.ntrn.tech",
   "https://neutron-testnet-rpc.polkachu.com:443",
@@ -76,20 +61,20 @@ const REST_CANDIDATES = [
   "https://neutron-testnet-api.polkachu.com",
   "https://api.pion.remedy.tm.p2p.org",
 ];
+
+// DEV は Vite proxy 経由（/ipfs-upload → /api/ipfs/upload に rewrite）
+const IS_DEV = typeof import.meta !== "undefined" && !!import.meta.env?.DEV;
+const DEV_PROXY_PATH = "/ipfs-upload";
+
 async function firstReachable(urls, kind = "rpc") {
   for (const u of urls) {
     try {
       const probe = kind === "rpc" ? `${u}/health` : `${u}/cosmos/base/tendermint/v1beta1/node_info`;
       const r = await fetch(probe, { method: "GET" });
       if (r.ok) return u;
-    } catch (e) { /* try next */ }
+    } catch {}
   }
   throw new Error(`No ${kind.toUpperCase()} endpoint reachable`);
-}
-
-function formatExplorerTx(txhash) {
-  if (!txhash || !TX_EXPLORER_BASE) return "";
-  return `${TX_EXPLORER_BASE}${txhash}`;
 }
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -99,21 +84,18 @@ function fileToDataUrl(file) {
     r.readAsDataURL(file);
   });
 }
-function nowTokenId() {
-  const d = new Date();
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const da = String(d.getUTCDate()).padStart(2, "0");
-  const h = String(d.getUTCHours()).padStart(2, "0");
-  const mi = String(d.getUTCMinutes()).padStart(2, "0");
-  const s = String(d.getUTCSeconds()).padStart(2, "0");
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `nft-${y}${m}${da}-${h}${mi}${s}-${rand}`;
+function nowUnixSec() { return Math.floor(Date.now() / 1000); }
+function toLocalDatetimeInputValue(unixSec) {
+  const d = new Date(unixSec * 1000);
+  const tz = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - tz).toISOString().slice(0, 16);
+}
+function parseLocalDatetimeInputValue(s) {
+  const t = new Date(s).getTime();
+  return Number.isFinite(t) ? Math.floor(t / 1000) : 0;
 }
 
-/**
- * ===== Azure uploader helpers =====
- */
+/** ==== アップロード系 ==== */
 function arrayBufferToBase64(buf) {
   const bytes = new Uint8Array(buf);
   let binary = "";
@@ -123,114 +105,129 @@ function arrayBufferToBase64(buf) {
   }
   return btoa(binary);
 }
-function jsonToBase64(obj) {
-  const enc = new TextEncoder();
-  const bytes = enc.encode(JSON.stringify(obj));
-  return arrayBufferToBase64(bytes.buffer);
-}
 function extractCidFromResponse(j) {
   if (!j || typeof j !== "object") return "";
-  const tryFields = [
-    "cid", "CID", "Cid",
-    "ipfs", "Ipfs",
-    "ipfsHash", "IpfsHash",
-    "hash", "Hash",
-    "path", "Path",
-    "url", "Url",
-  ];
+  const fields = ["cid","CID","Cid","ipfs","Ipfs","ipfsHash","IpfsHash","hash","Hash","path","Path","url","Url"];
   let val = null;
-  for (const f of tryFields) {
-    if (typeof j[f] === "string" && j[f].length) { val = j[f]; break; }
-  }
+  for (const f of fields) if (typeof j[f] === "string" && j[f]) { val = j[f]; break; }
   if (!val && j.pin && typeof j.pin.cid === "string") val = j.pin.cid;
   if (!val && typeof j.result === "string") val = j.result;
   if (!val) return "";
-  // normalize
-  const ipfsMatch = val.match(/\/(?:ipfs|IPFS)\/([^/?#]+)/);
-  if (ipfsMatch) val = ipfsMatch[1];
-  val = val.replace(/^ipfs:\/\//i, "").replace(/^ipfs\//i, "");
-  return val;
+  const m = val.match(/\/(?:ipfs|IPFS)\/([^/?#]+)/);
+  if (m) val = m[1];
+  return val.replace(/^ipfs:\/\//i, "").replace(/^ipfs\//i, "");
 }
 
-/** Azure Functions 用: 任意バイナリ（ファイル）アップロード */
-async function customUploadFile(file, endpoint) {
+/** DEV/PROD フォールバック付き：画像→CID */
+async function customUploadFileWithFallback(file) {
   const ab = await file.arrayBuffer();
   const base64 = arrayBufferToBase64(ab);
-  const payload = {
-    Name: file.name || `file-${Date.now()}`,
-    ContentType: file.type || "application/octet-stream",
-    Data: base64,
-  };
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Custom upload failed: ${res.status} ${text}`);
-  let j = {};
-  try { j = JSON.parse(text); } catch { /* non-JSON */ }
-  const cid = extractCidFromResponse(j) || extractCidFromResponse({ path: text });
-  if (!cid) throw new Error(`Custom upload response does not contain CID. Raw: ${text.slice(0, 400)}`);
-  return cid;
+  const payload = { Name: file.name || `file-${Date.now()}`, ContentType: file.type || "application/octet-stream", Data: base64 };
+
+  const endpoints = IS_DEV ? [DEV_PROXY_PATH, ENV.CUSTOM_UPLOAD_ENDPOINT] : [ENV.CUSTOM_UPLOAD_ENDPOINT];
+  const contentTypes = ["application/json", "text/plain;charset=UTF-8"];
+
+  let lastErr = null, lastDetail = null;
+  for (const ep of endpoints) {
+    for (const ct of contentTypes) {
+      try {
+        const res = await fetch(ep, {
+          method: "POST",
+          headers: { "Content-Type": ct },
+          body: JSON.stringify(payload),
+          mode: "cors",
+          credentials: "omit",
+        });
+        const text = await res.text();
+        if (!res.ok) { lastErr = new Error(`Upload failed ${res.status} at ${ep}`); lastDetail = { endpoint: ep, status: res.status, body: text.slice(0,200) }; continue; }
+        let j = {};
+        try { j = JSON.parse(text); } catch {}
+        const cid = extractCidFromResponse(j) || extractCidFromResponse({ path: text });
+        if (!cid) { lastErr = new Error(`Response has no CID at ${ep}`); lastDetail = { endpoint: ep, status: res.status, body: text.slice(0,400) }; continue; }
+        return { cid, endpoint: ep, raw: text };
+      } catch (e) {
+        lastErr = e; lastDetail = { endpoint: ep, error: String(e?.message || e) };
+      }
+    }
+  }
+  const msg = `画像アップロードに失敗しました。${lastErr ? String(lastErr) : ""}`;
+  throw Object.assign(new Error(msg), { detail: lastDetail });
 }
 
-/** Azure Functions 用: JSON メタデータアップロード */
-async function customUploadJSON(jsonObj, endpoint, nameHint = "metadata.json") {
-  const base64 = jsonToBase64(jsonObj);
-  const payload = {
-    Name: nameHint.endsWith('.json') ? nameHint : `${nameHint}.json`,
-    ContentType: "application/json",
-    Data: base64,
-  };
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Custom JSON upload failed: ${res.status} ${text}`);
-  let j = {};
-  try { j = JSON.parse(text); } catch { /* non-JSON */ }
-  const cid = extractCidFromResponse(j) || extractCidFromResponse({ path: text });
-  if (!cid) throw new Error(`Custom JSON upload response does not contain CID. Raw: ${text.slice(0, 400)}`);
-  return cid;
-}
-
-/** ここからUI */
-function MintNFTPage() {
+/** ==== メイン UI ==== */
+export default function MintNFTPage() {
   const navigate = useNavigate();
 
-  const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState("");
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [attributes, setAttributes] = useState([{ trait_type: "", value: "" }]);
-
-  const [tokenId, setTokenId] = useState(nowTokenId());
-  const [owner, setOwner] = useState(""); // Keplr接続後
-  const [contractAddr, setContractAddr] = useState(CW721_CONTRACT_DEFAULT);
-
-  const [cidImage, setCidImage] = useState("");
-  const [cidMetadata, setCidMetadata] = useState("");
-
+  // Wallet
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [owner, setOwner] = useState("");
+  const clientRef = useRef(null);
+  const [rpcUrlUsed, setRpcUrlUsed] = useState("");
+
+  // Payload（CLI準拠）
+  const [observedAtSec, setObservedAtSec] = useState(nowUnixSec());
+  const [speciesScientific, setSpeciesScientific] = useState("Prunus mume");
+  const [nameJa, setNameJa] = useState("ウメ");
+  const [category, setCategory] = useState("植物");
+  const [lifeStatus, setLifeStatus] = useState("野生");
+  const [notes, setNotes] = useState("東京駅付近");
+
+  // 追加メタ（追加のみ）
+  const [extras, setExtras] = useState([{ key: "", value: "" }]);
+  const addExtra = () => setExtras((p) => [...p, { key: "", value: "" }]);
+  const removeExtra = (i) => setExtras((p) => p.filter((_, idx) => idx !== i));
+  const updateExtra = (i, k, v) => setExtras((p) => p.map((e, idx) => idx === i ? { ...e, [k]: v } : e));
+
+  // 場所（任意・空欄可／初期=空＝null相当）
+  const [latDeg, setLatDeg] = useState("");
+  const [lonDeg, setLonDeg] = useState("");
+  const fillCurrentLocation = async () => {
+    if (!navigator.geolocation) { setMessage("このブラウザは位置情報に対応していません。"); return; }
+    if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+      setMessage("位置情報はHTTPSまたはlocalhostでのみ使用できます。"); return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLatDeg(String(pos.coords.latitude.toFixed(6)));
+        setLonDeg(String(pos.coords.longitude.toFixed(6)));
+      },
+      (err) => setMessage(`現在地の取得に失敗: ${err?.message || err}`),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+    );
+  };
+
+  // 画像
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState("");
+  const [cidImage, setCidImage] = useState("");
+  const [uploadDiag, setUploadDiag] = useState(null);
+
+  // カメラ
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraError, setCameraError] = useState("");
+  const [facingMode, setFacingMode] = useState("environment");
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
 
   const [uploading, setUploading] = useState(false);
-  const [minting, setMinting] = useState(false);
-
+  const [sending, setSending] = useState(false);
   const [txHash, setTxHash] = useState("");
   const [message, setMessage] = useState("");
 
-  // 追加：コントラクト状態
-  const [cfg, setCfg] = useState(null);       // { public_mint_enabled, mint_start, mint_end, revealed, ... }
-  const [price, setPrice] = useState(null);   // { denom, amount }
-  const [supply, setSupply] = useState(null); // { total_minted, max_supply }
-  const [isAdminView, setIsAdminView] = useState(false);
-  const [fixTokenId, setFixTokenId] = useState("");
-
-  const clientRef = useRef(null);
+  // スクロール制御（オーバーレイ中だけロック）
+  useEffect(() => {
+    const html = document.documentElement, body = document.body;
+    if (cameraOpen) {
+      const prevHtmlOverflow = html.style.overflow;
+      const prevBodyOverflow = body.style.overflow;
+      const prevOverscroll = body.style.overscrollBehavior;
+      html.style.overflow = "hidden";
+      body.style.overflow = "hidden";
+      body.style.overscrollBehavior = "contain";
+      return () => { html.style.overflow = prevHtmlOverflow; body.style.overflow = prevBodyOverflow; body.style.overscrollBehavior = prevOverscroll; };
+    }
+  }, [cameraOpen]);
 
   // レイアウト
   const [clientWidth, setClientWidth] = useState(100);
@@ -246,26 +243,20 @@ function MintNFTPage() {
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
   }, []);
+  useEffect(() => () => stopCamera(), []);
 
-  // Keplr接続
+  // Keplr 接続
   const connectKeplr = async () => {
     try {
-      setConnecting(true);
-      setMessage("");
-
-      // Probe RPC/REST candidates for pion-1
+      setConnecting(true); setMessage("");
       const rpcUrl = await firstReachable(RPC_CANDIDATES, "rpc");
       const restUrl = await firstReachable(REST_CANDIDATES, "rest");
+      setRpcUrlUsed(rpcUrl);
+      if (!window.keplr) throw new Error("Keplrが見つかりません。拡張機能をインストールしてください。");
 
-      if (!window.keplr) {
-        throw new Error("Keplrが見つかりません。ブラウザ拡張をインストールしてください。");
-      }
-      if (window.keplr.experimentalSuggestChain && CHAIN_ID) {
+      if (window.keplr.experimentalSuggestChain) {
         await window.keplr.experimentalSuggestChain({
-          chainId: CHAIN_ID,
-          chainName: CHAIN_NAME,
-          rpc: rpcUrl,
-          rest: restUrl,
+          chainId: CHAIN_ID, chainName: CHAIN_NAME, rpc: rpcUrl, rest: restUrl,
           bip44: { coinType: 118 },
           bech32Config: {
             bech32PrefixAccAddr: BECH32_PREFIX,
@@ -276,12 +267,7 @@ function MintNFTPage() {
             bech32PrefixConsPub: `${BECH32_PREFIX}valconspub`,
           },
           currencies: [{ coinDenom: DISPLAY_DENOM, coinMinimalDenom: DENOM, coinDecimals: DECIMALS }],
-          feeCurrencies: [{
-            coinDenom: DISPLAY_DENOM,
-            coinMinimalDenom: DENOM,
-            coinDecimals: DECIMALS,
-            gasPriceStep: { low: 0.01, average: GAS_PRICE_NUM, high: 0.04 },
-          }],
+          feeCurrencies: [{ coinDenom: DISPLAY_DENOM, coinMinimalDenom: DENOM, coinDecimals: DECIMALS, gasPriceStep: { low: 0.01, average: GAS_PRICE_NUM, high: 0.04 } }],
           stakeCurrency: { coinDenom: DISPLAY_DENOM, coinMinimalDenom: DENOM, coinDecimals: DECIMALS },
           features: ["cosmwasm"],
         });
@@ -290,357 +276,435 @@ function MintNFTPage() {
       await window.keplr.enable(CHAIN_ID);
       const offlineSigner = await window.keplr.getOfflineSignerAuto(CHAIN_ID);
       const [{ address }] = await offlineSigner.getAccounts();
-
       const gasPrice = GasPrice.fromString(`${GAS_PRICE_NUM}${DENOM}`);
-      const client = await SigningCosmWasmClient.connectWithSigner(rpcUrl, offlineSigner, {
-        gasPrice,
-        prefix: BECH32_PREFIX,
-      });
-
+      const client = await SigningCosmWasmClient.connectWithSinger?.(rpcUrl, offlineSigner, { gasPrice, prefix: BECH32_PREFIX })
+        || await SigningCosmWasmClient.connectWithSigner(rpcUrl, offlineSigner, { gasPrice, prefix: BECH32_PREFIX });
       clientRef.current = client;
       setOwner(address);
       setConnected(true);
       setMessage(`Keplrに接続しました（RPC: ${rpcUrl}）`);
-
-      // 接続直後に状態取得
-      if (contractAddr && contractAddr !== "/XXX/") {
-        await refreshContractState(client, contractAddr);
-      }
     } catch (err) {
-      console.error(err);
-      setMessage(err.message || String(err));
-    } finally {
-      setConnecting(false);
-    }
+      console.error(err); setMessage(err?.message || String(err));
+    } finally { setConnecting(false); }
   };
 
-  // 状態取得
-  const refreshContractState = async (client, addr) => {
+  // カメラ
+  async function startCamera(mode = "environment") {
     try {
-      const cfgResp = await client.queryContractSmart(addr, { config: {} });
-      const priceResp = await client.queryContractSmart(addr, { mint_price: {} });
-      const supplyResp = await client.queryContractSmart(addr, { supply: {} });
-      setCfg(cfgResp);
-      setPrice(priceResp);
-      setSupply(supplyResp);
-    } catch (e) {
-      console.warn("query failed:", e?.message || e);
-    }
+      setCameraError(""); setFacingMode(mode);
+      if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+        setCameraError("HTTPS または localhost でアクセスしてください。"); return;
+      }
+      if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+      if (!navigator.mediaDevices?.getUserMedia) { setCameraError("このブラウザはカメラに対応していません。"); return; }
+      try { const st = await navigator.permissions?.query?.({ name: "camera" }); if (st && st.state === "denied") { setCameraError("カメラがブロックされています。許可してください。"); return; } } catch {}
+      const constraints = { audio: false, video: { facingMode: { ideal: mode }, width: { ideal: 1280 }, height: { ideal: 1280 } } };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream; setCameraOpen(true);
+      if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play(); } catch {} }
+    } catch (e) { console.error(e); setCameraError(e?.message || String(e)); setCameraOpen(false); }
+  }
+  function stopCamera() {
+    if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraOpen(false);
+  }
+  function downscaleAndToBlob(video, maxSide = 1280, quality = 0.92) {
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return Promise.resolve(null);
+    let W = w, H = h;
+    if (w >= h && w > maxSide) { const r = maxSide / w; W = Math.round(w * r); H = Math.round(h * r); }
+    else if (h > w && h > maxSide) { const r = maxSide / h; W = Math.round(w * r); H = Math.round(h * r); }
+    const canvas = document.createElement("canvas"); canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext("2d"); ctx.drawImage(video, 0, 0, W, H);
+    return new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", quality));
+  }
+  const takePhoto = async () => {
+    try {
+      const video = videoRef.current; if (!video) return;
+      const blob = await downscaleAndToBlob(video, 1280, 0.92);
+      if (!blob) { setMessage("画像の生成に失敗しました。"); return; }
+      const name = `camera-${Date.now()}.jpg`;
+      const f = new File([blob], name, { type: "image/jpeg" });
+      const url = URL.createObjectURL(blob);
+      if (preview && preview.startsWith("blob:")) URL.revokeObjectURL(preview);
+      setPreview(url); setFile(f); stopCamera();
+    } catch (e) { console.error(e); setMessage(e?.message || String(e)); }
   };
+  const flipCamera = async () => { await startCamera(facingMode === "environment" ? "user" : "environment"); };
 
   // ファイル選択
   const onSelectFile = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFile(f);
-    const url = await fileToDataUrl(f);
-    setPreview(url);
-    setName(f.name.replace(/\.[^/.]+$/, ""));
+    const f = e.target.files?.[0]; if (!f) return;
+    if (!f.type.startsWith("image/")) { setMessage("画像ファイルを選択してください。"); return; }
+    setFile(f); const url = await fileToDataUrl(f); setPreview(url);
   };
 
-  // Attributes 操作
-  const addAttribute = () => setAttributes((prev) => [...prev, { trait_type: "", value: "" }]);
-  const removeAttribute = (idx) => setAttributes((prev) => prev.filter((_, i) => i !== idx));
-  const updateAttribute = (idx, key, val) =>
-    setAttributes((prev) => prev.map((a, i) => (i === idx ? { ...a, [key]: val } : a)));
-
-  // 画像→メタデータの順でIPFSへ（Azure Functions 専用）
+  // 画像→CID
   const handleUploadToIPFS = async () => {
     try {
-      setUploading(true);
-      setMessage("");
-      setCidImage("");
-      setCidMetadata("");
+      setUploading(true); setMessage(""); setCidImage(""); setUploadDiag(null);
+      if (!file) throw new Error("画像を選択/撮影してください。");
+      const { cid, endpoint, raw } = await customUploadFileWithFallback(file);
+      setCidImage(cid);
+      setUploadDiag({ ok: true, endpoint, sample: (raw || "").slice(0, 200) });
+      setMessage("画像をIPFSにアップロードしました。CIDを使ってトランザクションを送信できます。");
+    } catch (err) {
+      console.error(err);
+      const detail = err?.detail ? `\n詳細: ${JSON.stringify(err.detail).slice(0, 400)}` : "";
+      setUploadDiag({ ok: false, error: String(err?.message || err), detail: err?.detail || null });
+      setMessage(`画像CIDの取得に失敗しました。${detail}`);
+    } finally { setUploading(false); }
+  };
 
-      if (!file) throw new Error("画像ファイルを選択してください。");
-      if (!CUSTOM_UPLOAD_ENDPOINT) {
-        throw new Error("カスタムアップロードエンドポイントが未設定です（ENV.VITE_CUSTOM_UPLOAD_ENDPOINT）。");
-      }
+  // 送信
+  const handleStore = async () => {
+    try {
+      setSending(true); setMessage(""); setTxHash("");
+      if (!clientRef.current) throw new Error("Keplrに接続してください。");
+      if (!owner) throw new Error("送信者アドレスが未設定です。");
+      if (!cidImage) throw new Error("まず画像をIPFSにアップロードしてCIDを取得してください。");
 
-      // 1) 画像 → CID（Azure: base64）
-      const imageCid = await customUploadFile(file, CUSTOM_UPLOAD_ENDPOINT);
-      setCidImage(imageCid);
+      // place: 両方数値が入っているときだけ採用
+      const latStr = (latDeg ?? "").trim();
+      const lonStr = (lonDeg ?? "").trim();
+      const hasLatLon =
+        latStr.length > 0 && lonStr.length > 0 &&
+        Number.isFinite(parseFloat(latStr)) && Number.isFinite(parseFloat(lonStr));
+      const latNum = hasLatLon ? parseFloat(latStr) : null;
+      const lonNum = hasLatLon ? parseFloat(lonStr) : null;
+      const latInt = hasLatLon ? Math.round(latNum * 1000) : null;
+      const lonInt = hasLatLon ? Math.round(lonNum * 1000) : null;
 
-      // 2) メタデータ生成 → CID（Azure: base64）
-      const filteredAttributes = attributes
-        .filter((a) => a.trait_type || a.value)
-        .map((a) => ({ trait_type: a.trait_type || "", value: a.value || "" }));
+      const extrasFiltered = extras
+        .filter((e) => (e.key ?? "").trim() || (e.value ?? "").trim())
+        .map((e) => ({ key: String(e.key), value: String(e.value) }));
 
-      const metadata = {
-        name: name || tokenId,
-        description: description || "",
-        image: `ipfs://${imageCid}`,
-        attributes: filteredAttributes,
+      const payload = {
+        observed_at: Number(observedAtSec),
+        species: { scientific: String(speciesScientific || "").trim(), vernacular_ja: String(nameJa || "").trim() },
+        category: String(category || "").trim(),
+        life_status: String(lifeStatus || "").trim(),
+        notes: String(notes || "").trim(),
+        ...(hasLatLon ? { place: { lat: latInt, lon: lonInt } } : {}),
+        ...(extrasFiltered.length ? { extras: extrasFiltered } : {}),
+      };
+      const execMsg = { store: { payload, cid: cidImage } };
+
+      const client = clientRef.current;
+
+      /** @type {import('@cosmjs/cosmwasm-stargate').MsgExecuteContractEncodeObject} */
+      const execEncodeObj = {
+        typeUrl: "/cosmwasm.wasm.v1.MsgExecuteContract",
+        value: { sender: owner, contract: CONTRACT_ADDR, msg: toUtf8(JSON.stringify(execMsg)), funds: [] },
       };
 
-      const jsonName = (name || tokenId) + ".json";
-      const metadataCid = await customUploadJSON(metadata, CUSTOM_UPLOAD_ENDPOINT, jsonName);
-      setCidMetadata(metadataCid);
-
-      setMessage("IPFSアップロードが完了しました。続けてNFTをミントできます。");
-    } catch (err) {
-      console.error(err);
-      setMessage(err.message || String(err));
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  // ミント
-  const handleMint = async () => {
-    try {
-      setMinting(true);
-      setMessage("");
-      setTxHash("");
-
-      if (!clientRef.current) throw new Error("Keplrに接続してください。");
-      if (!contractAddr || contractAddr === "/XXX/") throw new Error("CW721コントラクトアドレスを入力してください。");
-      if (!owner) throw new Error("オーナーアドレス(Owner)が空です。");
-      if (!cidMetadata) throw new Error("先にIPFSへアップロードしてメタデータCIDを取得してください。");
-
-      const client = clientRef.current;
-
-      // Reveal前はコントラクト側で placeholder_uri が採用されます。
-      const execMsg =
-        MINT_MSG_KIND === "public_mint"
-          ? { public_mint: { token_id: tokenId, owner, token_uri: `ipfs://${cidMetadata}` } }
-          : { mint: { token_id: tokenId, owner, token_uri: `ipfs://${cidMetadata}` } };
-
-      // 手数料：コントラクトの mint_price を優先。未取得時のみ ENV フォールバック。
-      let funds;
-      const denom = price?.denom || ENV_FEE_DENOM;
-      const amount = price?.amount || ENV_FEE_AMOUNT;
-      if (denom && String(amount) !== "0") {
-        funds = [{ amount: String(amount), denom: String(denom) }];
+      let fee = "auto";
+      try {
+        const gas = await client.simulate(owner, [execEncodeObj], "store observation");
+        const gasPrice = GasPrice.fromString(`${GAS_PRICE_NUM}${DENOM}`);
+        fee = calculateFee(Math.round(gas * GAS_ADJ), gasPrice);
+      } catch (e) {
+        console.warn("simulate failed, fallback to auto fee:", e?.message || e);
+        fee = "auto";
       }
 
-      const result = await client.execute(owner, contractAddr, execMsg, "auto", `mint ${tokenId}`, funds);
+      const result = await client.execute(owner, CONTRACT_ADDR, execMsg, fee, "store observation");
       const txhash = result?.transactionHash || result?.hash || "";
       setTxHash(txhash);
-      setMessage("NFTミントが完了しました。");
-
-      // 供給情報更新
-      await refreshContractState(client, contractAddr);
-    } catch (err) {
-      console.error(err);
-      const t = String(err?.message || err);
-      if (t.includes("MintNotOpen")) setMessage("ミント期間外です（MintNotOpen）");
-      else if (t.includes("PublicMintDisabled")) setMessage("現在ミントは停止中です（PublicMintDisabled）");
-      else if (t.includes("PerAddressLimitReached")) setMessage("このアドレスのミント上限に達しています（PerAddressLimitReached）");
-      else if (t.includes("MaxSupplyReached")) setMessage("供給上限に達しています（MaxSupplyReached）");
-      else if (t.includes("Insufficient mint fee") || t.includes("InsufficientMintFee")) setMessage("手数料が不足しています（InsufficientMintFee）");
-      else if (t.includes("TransferLocked")) setMessage("転送ロック中の操作は拒否されました（TransferLocked）");
-      else setMessage(t);
-    } finally {
-      setMinting(false);
-    }
+      setMessage("観測データの保存TXを送信しました。");
+    } catch (err) { console.error(err); setMessage(err?.message || String(err)); }
+    finally { setSending(false); }
   };
 
-  // 任意：管理者向け fix_token_uri
-  const [adminPanelOpen, setAdminPanelOpen] = useState(false);
-  const handleFixTokenUri = async () => {
-    try {
-      if (!clientRef.current) throw new Error("Keplrに接続してください。");
-      if (!contractAddr || contractAddr === "/XXX/") throw new Error("CW721コントラクトアドレスを入力してください。");
-      if (!fixTokenId) throw new Error("token_id を入力してください。");
-      const client = clientRef.current;
-      const res = await client.execute(owner, contractAddr, { fix_token_uri: { token_id: fixTokenId } }, "auto", "fix token uri");
-      setTxHash(res?.transactionHash || res?.hash || "");
-      setMessage("fix_token_uri を実行しました。");
-    } catch (e) {
-      setMessage(e?.message || String(e));
-    }
+  // 表示用
+  const { latIntDisp, lonIntDisp } = useMemo(() => {
+    const latStr = (latDeg ?? "").trim();
+    const lonStr = (lonDeg ?? "").trim();
+    const ok = latStr.length > 0 && lonStr.length > 0 &&
+               Number.isFinite(parseFloat(latStr)) && Number.isFinite(parseFloat(lonStr));
+    return ok
+      ? { latIntDisp: Math.round(parseFloat(latStr) * 1000), lonIntDisp: Math.round(parseFloat(lonStr) * 1000) }
+      : { latIntDisp: "-", lonIntDisp: "-" };
+  }, [latDeg, lonDeg]);
+
+  const finalPayload = useMemo(() => {
+    const latStr = (latDeg ?? "").trim();
+    const lonStr = (lonDeg ?? "").trim();
+    const hasLatLon = latStr.length > 0 && lonStr.length > 0 &&
+      Number.isFinite(parseFloat(latStr)) && Number.isFinite(parseFloat(lonStr));
+    const extrasFiltered = extras
+      .filter((e) => (e.key ?? "").trim() || (e.value ?? "").trim())
+      .map((e) => ({ key: String(e.key), value: String(e.value) }));
+    return {
+      observed_at: Number(observedAtSec),
+      species: { scientific: String(speciesScientific || "").trim(), vernacular_ja: String(nameJa || "").trim() },
+      category: String(category || "").trim(),
+      life_status: String(lifeStatus || "").trim(),
+      notes: String(notes || "").trim(),
+      ...(hasLatLon ? { place: { lat: Math.round(parseFloat(latStr) * 1000), lon: Math.round(parseFloat(lonStr) * 1000) } } : {}),
+      ...(extrasFiltered.length ? { extras: extrasFiltered } : {}),
+    };
+  }, [observedAtSec, speciesScientific, nameJa, category, lifeStatus, notes, latDeg, lonDeg, extras]);
+
+  const finalMsg = useMemo(() => ({ store: { payload: finalPayload, cid: cidImage || "(CID未取得)" } }), [finalPayload, cidImage]);
+
+  const copyJson = async (obj) => {
+    try { await navigator.clipboard.writeText(JSON.stringify(obj, null, 2)); setMessage("JSONをコピーしました。"); }
+    catch { setMessage("クリップボードの書き込みに失敗しました。"); }
   };
-
-  const explorerLink = useMemo(() => (txHash ? formatExplorerTx(txHash) : ""), [txHash]);
-
-  // ミント期間の見やすい表示
-  const periodLabel = useMemo(() => {
-    if (!cfg) return "-";
-    const s = Number(cfg.mint_start || 0);
-    const e = Number(cfg.mint_end || 0);
-    const fmt = (x) => (x ? new Date(x * 1000).toISOString().slice(0, 19).replace("T", " ") + "Z" : "無制限");
-    return `${fmt(s)} 〜 ${fmt(e)}`;
-  }, [cfg]);
 
   return (
-    <div className="div_base">
-      <div className="div_header">IPFSアップロード & NFTミント（Neutron Testnet）</div>
+    <div className="div_base" style={{ minHeight: "100vh", overflowY: "auto" }}>
+      <div className="div_header">Flora Observation: 画像→IPFS(CID)→store TX（Neutron Testnet）</div>
 
-      <div className="div_content">
+      <div className="div_content" style={{ overflow: "visible" }}>
         <div style={{ width: clientWidth, margin: "8px auto" }}>
-          {/* ウォレット接続 */}
+          {/* ウォレット接続 / コントラクト（固定リンク付き） */}
           <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: "8px" }}>
             <div style={{ fontWeight: 600, marginBottom: "6px" }}>ウォレット接続</div>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <button type="button" disabled={connecting} onClick={connectKeplr}>
                 {connected ? "再接続" : "Keplrに接続"}
               </button>
-              <div style={{ fontSize: "12px", color: "#666" }}>
-                Chain: <b>{CHAIN_NAME}</b> ({CHAIN_ID})
+              <div style={{ fontSize: 12, color: "#666" }}>
+                Chain: <b>{CHAIN_NAME}</b> ({CHAIN_ID}) {rpcUrlUsed ? `— RPC: ${rpcUrlUsed}` : ""}
               </div>
             </div>
-            <div style={{ marginTop: "6px", fontSize: "13px" }}>
-              Owner（受取アドレス）:
+            <div style={{ marginTop: 6, fontSize: 13 }}>
+              送信者（Owner）:
               <input style={{ width: "100%" }} placeholder="あなたのアドレス" value={owner} onChange={(e) => setOwner(e.target.value)} />
             </div>
-            <div style={{ marginTop: "6px", fontSize: "13px" }}>
-              CW721コントラクトアドレス:
-              <div style={{ display: "flex", gap: 8 }}>
-                <input style={{ flex: 1 }} placeholder="/XXX/" value={contractAddr} onChange={(e) => setContractAddr(e.target.value)} />
-                <button
-                  type="button"
-                  onClick={async () => {
-                    if (clientRef.current && contractAddr && contractAddr !== "/XXX/") {
-                      await refreshContractState(clientRef.current, contractAddr);
-                      setMessage("コントラクトの状態を更新しました。");
-                    }
-                  }}
+            <div style={{ marginTop: 6, fontSize: 13 }}>
+              コントラクトアドレス（固定）:{" "}
+              <a href={CONTRACT_EXPLORER_URL} target="_blank" rel="noreferrer">
+                <code>{CONTRACT_ADDR}</code>
+              </a>
+            </div>
+          </div>
+
+          {/* 観測ペイロード */}
+          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #eee", borderRadius: 8, background: "#fafafa" }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>観測ペイロード</div>
+            <div style={{ display: "grid", gap: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  観測日時:
+                  <input
+                    type="datetime-local"
+                    value={toLocalDatetimeInputValue(observedAtSec)}
+                    onChange={(e) => setObservedAtSec(parseLocalDatetimeInputValue(e.target.value))}
+                    style={{ width: "100%" }}
+                  />
+                  <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+                    UNIX秒: {observedAtSec} <button type="button" onClick={() => setObservedAtSec(nowUnixSec())}>現在時刻</button>
+                  </div>
+                </div>
+                <div>
+                  生育状態（life_status）:
+                  <select value={lifeStatus} onChange={(e) => setLifeStatus(e.target.value)} style={{ width: "100%" }}>
+                    <option value="野生">野生</option>
+                    <option value="栽培">栽培</option>
+                    <option value="植栽">植栽</option>
+                    <option value="その他">その他</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  学名（species.scientific）:
+                  <input style={{ width: "100%" }} value={speciesScientific} onChange={(e) => setSpeciesScientific(e.target.value)} />
+                </div>
+                <div>
+                  和名（species.vernacular_ja）:
+                  <input style={{ width: "100%" }} value={nameJa} onChange={(e) => setNameJa(e.target.value)} />
+                </div>
+              </div>
+
+              <div>
+                カテゴリ（category）:
+                <select
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  style={{ width: "100%" }}
                 >
-                  状態更新
-                </button>
+                  {/* 先頭を未選択にしたい場合は下の空optionを有効化してください */}
+                  {/* <option value="" disabled>選択してください</option> */}
+                  <option value="植物">植物</option>
+                  <option value="動物">動物</option>
+                  <option value="菌類">菌類</option>
+                  <option value="藻類">藻類</option>
+                  <option value="地衣類">地衣類</option>
+                  <option value="その他">その他</option>
+                </select>
               </div>
-            </div>
-          </div>
 
-          {/* 現在のコントラクト状態 */}
-          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #eee", borderRadius: "8px", background: "#fafafa" }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>コントラクト状態</div>
-            <div style={{ fontSize: 13, lineHeight: 1.6 }}>
-              <div>公開ミント: {cfg?.public_mint_enabled ? "有効" : "停止"}</div>
-              <div>ミント期間: {periodLabel}</div>
-              <div>Reveal状態: {cfg?.revealed ? "公開済み" : "未公開（placeholder適用）"}</div>
-              <div>手数料: {price ? `${price.amount} ${price.denom}` : (ENV_FEE_DENOM && ENV_FEE_AMOUNT !== "0" ? `${ENV_FEE_AMOUNT} ${ENV_FEE_DENOM}（ENV）` : "無料")}</div>
-              <div>供給: {supply ? `${supply.total_minted}${supply.max_supply ? ` / ${supply.max_supply}` : ""}` : "-"}</div>
-              <div>転送ロック: {cfg?.transfer_locked ? "ON" : "OFF"}</div>
-              {cfg?.base_uri && <div>base_uri: {cfg.base_uri}</div>}
-              {cfg?.placeholder_uri && <div>placeholder_uri: {cfg.placeholder_uri}</div>}
-              {cfg?.fee_recipient && <div>fee_recipient: {cfg.fee_recipient}</div>}
-            </div>
-          </div>
-
-          {/* 画像選択 */}
-          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: "8px" }}>
-            <div style={{ fontWeight: 600, marginBottom: "6px" }}>1) 画像ファイル</div>
-            <input type="file" accept="image/*" onChange={onSelectFile} />
-            {preview && (
-              <div style={{ marginTop: "8px" }}>
-                <img src={preview} alt="preview" style={{ objectFit: "cover", width: itemWidth, height: itemWidth, borderRadius: "4px" }} />
-              </div>
-            )}
-          </div>
-
-          {/* メタデータ */}
-          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: "8px" }}>
-            <div style={{ fontWeight: 600, marginBottom: "6px" }}>2) メタデータ</div>
-            <div style={{ display: "grid", gap: "6px" }}>
               <div>
-                トークンID:
-                <div style={{ display: "flex", gap: "8px" }}>
-                  <input style={{ flex: 1 }} value={tokenId} onChange={(e) => setTokenId(e.target.value)} />
-                  <button type="button" onClick={() => setTokenId(nowTokenId())}>再生成</button>
+                備考（notes）:
+                <textarea rows={2} style={{ width: "100%" }} value={notes} onChange={(e) => setNotes(e.target.value)} />
+              </div>
+
+              {/* 場所（任意、空欄OK） */}
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>場所（任意）</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8 }}>
+                  <input placeholder="緯度（度） 例: 35.681" value={latDeg} onChange={(e) => setLatDeg(e.target.value)} />
+                  <input placeholder="経度（度） 例: 139.767" value={lonDeg} onChange={(e) => setLonDeg(e.target.value)} />
+                  <button type="button" onClick={fillCurrentLocation}>現在地</button>
+                </div>
+                <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+                  ※ どちらかが空欄/不正なら <code>place</code> は送信に含めません（エラーになりません）。<br/>
+                  送信値プレビュー: lat={latIntDisp} / lon={lonIntDisp}（度×1000）
                 </div>
               </div>
-              <div>
-                名前（name）:
-                <input style={{ width: "100%" }} placeholder="My NFT Name" value={name} onChange={(e) => setName(e.target.value)} />
-              </div>
-              <div>
-                説明（description）:
-                <textarea style={{ width: "100%" }} rows={3} placeholder="説明…" value={description} onChange={(e) => setDescription(e.target.value)} />
-              </div>
-              <div style={{ marginTop: "8px" }}>
+
+              {/* 追加メタデータ（追加のみ） */}
+              <div style={{ marginTop: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ fontWeight: 600 }}>Attributes</div>
-                  <button type="button" onClick={addAttribute}>行を追加</button>
+                  <div style={{ fontWeight: 600 }}>追加メタデータ（extras）</div>
+                  <button type="button" onClick={addExtra}>行を追加</button>
                 </div>
-                {attributes.map((a, idx) => (
-                  <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "8px", marginTop: "6px" }}>
-                    <input placeholder="trait_type (例: rarity)" value={a.trait_type} onChange={(e) => updateAttribute(idx, "trait_type", e.target.value)} />
-                    <input placeholder="value (例: rare)" value={a.value} onChange={(e) => updateAttribute(idx, "value", e.target.value)} />
-                    <button type="button" onClick={() => removeAttribute(idx)}>削除</button>
+                {extras.map((e, idx) => (
+                  <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, marginTop: 6 }}>
+                    <input placeholder="key" value={e.key} onChange={(ev) => updateExtra(idx, "key", ev.target.value)} />
+                    <input placeholder="value" value={e.value} onChange={(ev) => updateExtra(idx, "value", ev.target.value)} />
+                    <button type="button" onClick={() => removeExtra(idx)}>削除</button>
                   </div>
                 ))}
-              </div>
-            </div>
-          </div>
-
-          {/* アップロード＆ミント */}
-          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: "8px" }}>
-            <div style={{ fontWeight: 600, marginBottom: "6px" }}>3) アップロード＆ミント</div>
-
-            <div style={{ display: "grid", gap: "8px" }}>
-              <button type="button" onClick={handleUploadToIPFS} disabled={uploading || !file}>
-                {uploading ? "アップロード中…" : "IPFSへアップロード（画像→メタデータ）"}
-              </button>
-
-              <div style={{ fontSize: "13px" }}>
-                画像CID: {cidImage ? <a href={`${IPFS_GATEWAY}${cidImage}`} target="_blank" rel="noreferrer">{cidImage}</a> : "-"}
-              </div>
-              <div style={{ fontSize: "13px" }}>
-                メタデータCID: {cidMetadata ? <a href={`${IPFS_GATEWAY}${cidMetadata}`} target="_blank" rel="noreferrer">{cidMetadata}</a> : "-"}
-              </div>
-
-              <button type="button" onClick={handleMint} disabled={minting || !cidMetadata || !connected}>
-                {minting ? "ミント中…" : "NFTをミント"}
-              </button>
-
-              <div style={{ fontSize: "13px" }}>
-                TxHash: {txHash ? (explorerLink ? <a href={explorerLink} target="_blank" rel="noreferrer">{txHash}</a> : txHash) : "-"}
-              </div>
-
-              <div style={{ fontSize: 12, color: "#777" }}>
-                {cfg?.revealed
-                  ? "※ Reveal済み：保存される token_uri は base_uri + token_id になります。"
-                  : "※ 未Reveal：保存される token_uri は placeholder_uri になります（ここで指定したCIDは表示に使われません）。"}
-              </div>
-            </div>
-          </div>
-
-          {/* 管理者向け（任意） */}
-          <div style={{ margin: "8px 0" }}>
-            <button type="button" onClick={() => setAdminPanelOpen((v) => !v)}>{adminPanelOpen ? "▲ 管理者パネルを閉じる" : "▼ 管理者パネルを開く"}</button>
-            {adminPanelOpen && (
-              <div style={{ marginTop: 8, padding: 12, border: "1px dashed #bbb", borderRadius: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>管理者向けユーティリティ</div>
-                <div style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontSize: 13, color: "#555" }}>
-                    Reveal 後に既発行トークンのURIを <code>base_uri + token_id</code> に更新します。
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <input style={{ flex: 1 }} placeholder="token_id" value={fixTokenId} onChange={(e) => setFixTokenId(e.target.value)} />
-                    <button type="button" onClick={handleFixTokenUri}>fix_token_uri 実行</button>
-                  </div>
+                <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+                  ※ ここで入力した要素は <code>payload.extras</code> に<b>追加</b>されます（既存を更新しません）。
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* 画像 → IPFS（CID取得） */}
+          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: 8 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>画像 → IPFS（CID取得）</div>
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              {/* 簡易カメラ */}
+              <input id="capture-input" type="file" accept="image/*" capture="environment" onChange={onSelectFile} style={{ display: "none" }} />
+              <label htmlFor="capture-input"><button type="button">カメラで撮影（簡易）</button></label>
+
+              {/* 高機能カメラ */}
+              <button type="button" onClick={() => startCamera("environment")} disabled={cameraOpen}>カメラを起動（背面）</button>
+              <button type="button" onClick={() => startCamera("user")} disabled={cameraOpen}>カメラを起動（前面）</button>
+
+              {/* 通常ファイル */}
+              <button type="button" onClick={() => document.getElementById("file-picker")?.click()} disabled={cameraOpen}>ファイルから選択</button>
+              <input id="file-picker" type="file" accept="image/*" onChange={onSelectFile} style={{ display: "none" }} />
+            </div>
+
+            {preview && (
+              <div style={{ marginTop: 8 }}>
+                <img src={preview} alt="preview" style={{ objectFit: "cover", width: itemWidth, height: itemWidth, borderRadius: 4 }} />
+              </div>
             )}
+
+            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+              <button type="button" onClick={handleUploadToIPFS} disabled={uploading || !file}>
+                {uploading ? "アップロード中…" : "IPFSへアップロード（画像→CID）"}
+              </button>
+              <div style={{ fontSize: 13 }}>
+                画像CID: {cidImage || "-"}
+              </div>
+              {uploadDiag && (
+                <div style={{ fontSize: 12, color: uploadDiag.ok ? "#2f7d32" : "#b00020" }}>
+                  {uploadDiag.ok
+                    ? <>アップロード成功（endpoint: <code>{uploadDiag.endpoint}</code>）</>
+                    : <>アップロード失敗: {uploadDiag.error}</>}
+                  {uploadDiag.detail && (
+                    <div style={{ marginTop: 4 }}>
+                      詳細: <code style={{ wordBreak: "break-all" }}>{JSON.stringify(uploadDiag.detail)}</code>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 送信（execute store） */}
+          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: 8 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>コントラクトへ送信</div>
+            <button type="button" onClick={handleStore} disabled={sending || !connected || !cidImage}>
+              {sending ? "送信中…" : "store TX を送る"}
+            </button>
+            <div style={{ fontSize: 13, marginTop: 8 }}>
+              TxHash: {txHash ? (<a href={formatTxLink(txHash)} target="_blank" rel="noreferrer">{txHash}</a>) : "-"}
+            </div>
+            <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+              ガス価格: {GAS_PRICE_NUM} {DENOM} / ガス調整: {GAS_ADJ}
+            </div>
           </div>
 
           {message && (
-            <div style={{ marginTop: "8px", padding: "10px", background: "#f3f7ea", border: "1px solid #ABCE1C", borderRadius: "6px" }}>
+            <div style={{ marginTop: 8, padding: 10, background: "#f3f7ea", border: "1px solid #ABCE1C", borderRadius: 6 }}>
               {message}
             </div>
           )}
         </div>
       </div>
 
-      {/* フッター（既存UIに合わせて） */}
-      <div style={{ height: "2px", backgroundColor: "#ABCE1C" }}></div>
-      <div style={{ height: "60px", display: "flex" }}>
-        <div className="div_footer" role="button" onClick={() => navigate('/qr-reader')}>
-          <i className="material-icons">qr_code_scanner</i>
+      {/* カメラオーバーレイ */}
+      {cameraOpen && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)",
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+            zIndex: 9999, padding: 12, touchAction: "none"
+          }}
+          onWheel={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
+        >
+          <div style={{ color: "#fff", marginBottom: 8, fontWeight: 600 }}>カメラ撮影</div>
+          <video
+            ref={videoRef} playsInline muted autoPlay
+            style={{ width: "min(95vw, 480px)", height: "min(95vw, 480px)", background: "#000", borderRadius: 8, objectFit: "cover" }}
+          />
+          {cameraError && <div style={{ color: "#ffbdbd", marginTop: 6, fontSize: 12 }}>{cameraError}</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button type="button" onClick={takePhoto}>シャッター</button>
+            <button type="button" onClick={() => startCamera(facingMode === "environment" ? "user" : "environment")}>前/背面 切替</button>
+            <button type="button" onClick={() => stopCamera()}>キャンセル</button>
+          </div>
+          <div style={{ color: "#bbb", marginTop: 6, fontSize: 12 }}>
+            ※ HTTPS または localhost でのみカメラが使用できます
+          </div>
         </div>
-        <div style={{ width: "2px", backgroundColor: "#ABCE1C", margin: "10px 0px" }}></div>
-        <div className="div_footer" role="button" onClick={() => navigate('/ipfs-upload-mint')}>
-          <i className="material-icons">upload_file</i>
+      )}
+
+      {/* 最下部：最終メタデータ表示 */}
+      <div style={{ padding: 12, borderTop: "2px solid #ABCE1C", background: "#fafafa" }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>最終メタデータ（payload / 送信メッセージ）</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>payload</div>
+            <pre style={{ margin: 0, padding: 8, background: "#fff", border: "1px solid #eee", borderRadius: 6, overflow: "auto" }}>
+{JSON.stringify(finalPayload, null, 2)}
+            </pre>
+            <button type="button" onClick={() => copyJson(finalPayload)} style={{ marginTop: 6 }}>payload をコピー</button>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>store メッセージ</div>
+            <pre style={{ margin: 0, padding: 8, background: "#fff", border: "1px solid #eee", borderRadius: 6, overflow: "auto" }}>
+{JSON.stringify(finalMsg, null, 2)}
+            </pre>
+            <button type="button" onClick={() => copyJson(finalMsg)} style={{ marginTop: 6 }}>メッセージをコピー</button>
+          </div>
         </div>
-        <div style={{ width: "2px", backgroundColor: "#ABCE1C", margin: "10px 0px" }}></div>
-        <div className="div_footer" role="button" onClick={() => navigate('/ipfs-list')}>
-          <i className="material-icons">collections</i>
-        </div>
+      </div>
+
+      {/* フッター（既存UI互換） */}
+      <div style={{ height: 2, backgroundColor: "#ABCE1C" }} />
+      <div style={{ height: 60, display: "flex" }}>
+        <div className="div_footer" role="button" onClick={() => navigate("/qr-reader")}><i className="material-icons">qr_code_scanner</i></div>
+        <div style={{ width: 2, backgroundColor: "#ABCE1C", margin: "10px 0" }} />
+        <div className="div_footer" role="button" onClick={() => navigate("/ipfs-upload-mint")}><i className="material-icons">upload_file</i></div>
+        <div style={{ width: 2, backgroundColor: "#ABCE1C", margin: "10px 0" }} />
+        <div className="div_footer" role="button" onClick={() => navigate("/ipfs-list")}><i className="material-icons">collections</i></div>
       </div>
     </div>
   );
 }
-
-export default MintNFTPage;
