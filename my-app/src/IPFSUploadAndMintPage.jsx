@@ -4,6 +4,108 @@ import { useNavigate } from "react-router-dom";
 import { SigningCosmWasmClient } from "@cosmjs/cosmwasm-stargate";
 import { GasPrice, calculateFee } from "@cosmjs/stargate";
 import { toUtf8 } from "@cosmjs/encoding";
+// import { HttpClient } from "@cosmjs/tendermint-rpc";
+import { CosmWasmClient } from "@cosmjs/cosmwasm-stargate";
+
+// function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// function base64ToHex(b64) {
+//   try {
+//     if (typeof window === "undefined") {
+//       // eslint-disable-next-line no-undef
+//       return Buffer.from(b64, "base64").toString("hex").toUpperCase();
+//     }
+//     const bin = atob(b64);
+//     let out = "";
+//     for (let i = 0; i < bin.length; i++) out += bin.charCodeAt(i).toString(16).padStart(2, "0");
+//     return out.toUpperCase();
+//   } catch { return ""; }
+// }
+
+// function b64try(s) {
+//   try {
+//     const dec = atob(s);
+//     return /^[\x09\x0A\x0D\x20-\x7E]+$/.test(dec) ? dec : s;
+//   } catch { return s; }
+// }
+
+// /** tx_search でコントラクト関連Txを1ページ取得（REST不使用） */
+// async function fetchContractTxsPage({
+//   rpc,
+//   addr,
+//   page = 1,
+//   perPage = 50,
+//   withBlockTime = true,
+//   forceMode, // "wasm._contract_address" | "message.contract_address" | undefined
+// }) {
+//   const client = new HttpClient(rpc);
+//   let mode = forceMode || "wasm._contract_address";
+
+//   const call = async (qMode) => {
+//     const req = {
+//       jsonrpc: "2.0",
+//       id: 1,
+//       method: "tx_search",
+//       params: {
+//         query: `${qMode}='${addr}'`,
+//         prove: false,
+//         page: String(page),
+//         per_page: String(perPage),
+//         order_by: "desc",
+//       },
+//     };
+//     return await client.execute(req);
+//   };
+
+//   // 1発目（wasm._contract_address）
+//   let res = await call(mode);
+//   let txs = res?.result?.txs ?? [];
+//   const total = Number(res?.result?.total_count ?? 0);
+
+//   // 最初のページで0件ならフォールバック
+//   if (!forceMode && page === 1 && txs.length === 0 && mode === "wasm._contract_address") {
+//     mode = "message.contract_address";
+//     res = await call(mode);
+//     txs = res?.result?.txs ?? [];
+//   }
+
+//   // ブロック時間（必要時のみ）
+//   let timeByHeight = {};
+//   if (withBlockTime && txs.length > 0) {
+//     const heights = Array.from(new Set(txs.map((t) => Number(t.height))));
+//     for (const h of heights) {
+//       const r = await fetch(`${rpc}/block?height=${h}`);
+//       const j = await r.json();
+//       timeByHeight[h] = j?.result?.block?.header?.time || "";
+//       await sleep(40);
+//     }
+//   }
+
+//   console.log(txs);
+
+//   const rows = txs.map((t) => ({
+//     hashB64: t.hash,
+//     hashHex: base64ToHex(t.hash),
+//     height: Number(t.height),
+//     code: Number(t.tx_result?.code ?? 0),
+//     time: withBlockTime ? (timeByHeight[Number(t.height)] || "") : "",
+//     // ★ 追加：イベントを保持（クリック時にここから id を抽出）
+//     events: t.tx_result?.events ?? [],
+//   }));
+
+//   return { rows, total, modeUsed: mode };
+// }
+
+// const res = await fetchContractTxsPage({
+//   rpc: "https://rpc-palvus.pion-1.ntrn.tech:443".trim().replace(/\/$/, ""),
+//   addr: "neutron1n0h44yyn6lhswspgvgwn4nzak6q8aj5qx0vaj95k2n0pl4zlcv8qcwzcc3".trim(),
+//   page: 1,
+//   perPage: 50,
+//   withBlockTime: true,
+//   undefined,
+// });
+// console.log(res);
+
 
 /**
  * 画像 → IPFS(Azure Functions) → CID を取得し、
@@ -71,7 +173,7 @@ async function firstReachable(urls, kind = "rpc") {
       const probe = kind === "rpc" ? `${u}/health` : `${u}/cosmos/base/tendermint/v1beta1/node_info`;
       const r = await fetch(probe, { method: "GET" });
       if (r.ok) return u;
-    } catch {}
+    } catch { }
   }
   throw new Error(`No ${kind.toUpperCase()} endpoint reachable`);
 }
@@ -106,7 +208,7 @@ function arrayBufferToBase64(buf) {
 }
 function extractCidFromResponse(j) {
   if (!j || typeof j !== "object") return "";
-  const fields = ["cid","CID","Cid","ipfs","Ipfs","ipfsHash","IpfsHash","hash","Hash","path","Path","url","Url"];
+  const fields = ["cid", "CID", "Cid", "ipfs", "Ipfs", "ipfsHash", "IpfsHash", "hash", "Hash", "path", "Path", "url", "Url"];
   let val = null;
   for (const f of fields) if (typeof j[f] === "string" && j[f]) { val = j[f]; break; }
   if (!val && j.pin && typeof j.pin.cid === "string") val = j.pin.cid;
@@ -136,11 +238,11 @@ async function customUploadFileWithFallback(file) {
           credentials: "omit",
         });
         const text = await res.text();
-        if (!res.ok) { lastErr = new Error(`Upload failed ${res.status} at ${ep}`); lastDetail = { endpoint: ep, status: res.status, body: text.slice(0,200) }; continue; }
+        if (!res.ok) { lastErr = new Error(`Upload failed ${res.status} at ${ep}`); lastDetail = { endpoint: ep, status: res.status, body: text.slice(0, 200) }; continue; }
         let j = {};
-        try { j = JSON.parse(text); } catch {}
+        try { j = JSON.parse(text); } catch { }
         const cid = extractCidFromResponse(j) || extractCidFromResponse({ path: text });
-        if (!cid) { lastErr = new Error(`Response has no CID at ${ep}`); lastDetail = { endpoint: ep, status: res.status, body: text.slice(0,400) }; continue; }
+        if (!cid) { lastErr = new Error(`Response has no CID at ${ep}`); lastDetail = { endpoint: ep, status: res.status, body: text.slice(0, 400) }; continue; }
         return { cid, endpoint: ep, raw: text };
       } catch (e) {
         lastErr = e; lastDetail = { endpoint: ep, error: String(e?.message || e) };
@@ -154,6 +256,38 @@ async function customUploadFileWithFallback(file) {
 /** ==== Main UI ==== */
 export default function MintNFTPage() {
   const navigate = useNavigate();
+
+
+  const [items, setItems] = useState([]);
+
+  async function fetchAllCids() {
+    const rpc = "https://rpc-palvus.pion-1.ntrn.tech:443".trim().replace(/\/$/, "");
+    const addr = "neutron1n0h44yyn6lhswspgvgwn4nzak6q8aj5qx0vaj95k2n0pl4zlcv8qcwzcc3".trim();
+    const client = await CosmWasmClient.connect(rpc);
+    const out = [];
+    let start_after = null;
+    while (true) {
+      const query = start_after == null
+        ? { list: { limit: 500 } }
+        : { list: { limit: 500, start_after } };
+      const res = await client.queryContractSmart(addr, query);
+      console.log(res);
+      const records = res?.records ?? [];
+      for (const r of records) {
+        out.push({ id: r.id, cid: r.cid || "" });
+      }
+      const next = res?.next_start_after ?? null;
+      if (!next) break;
+      start_after = next;
+    }
+    // id昇順で整列（任意）
+    out.sort((a, b) => a.id - b.id);
+    console.log(out.filter(item => item.id >= 5));
+    setItems(out);
+  }
+  const listing = async () => {
+    await fetchAllCids();
+  }
 
   // Wallet
   const [connecting, setConnecting] = useState(false);
@@ -290,26 +424,38 @@ export default function MintNFTPage() {
   };
 
   // カメラ
-  async function startCamera(mode = "environment") {
+  async function startCamera(mode) {
     try {
-      setCameraError(""); setFacingMode(mode);
-      if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
-        setCameraError("HTTPS または localhost でアクセスしてください。"); return;
-      }
+      const devices = (await navigator.mediaDevices.enumerateDevices());
+      const targets = devices.filter(item => item.label == "Microsoft Camera Rear");
+
+      setCameraError("");
+      setFacingMode(mode);
+      if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") { setCameraError("HTTPS または localhost でアクセスしてください。"); return; }
       if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
       if (!navigator.mediaDevices?.getUserMedia) { setCameraError("このブラウザはカメラに対応していません。"); return; }
-      try { const st = await navigator.permissions?.query?.({ name: "camera" }); if (st && st.state === "denied") { setCameraError("カメラがブロックされています。許可してください。"); return; } } catch {}
-      const constraints = { audio: false, video: { facingMode: { ideal: mode }, width: { ideal: 1280 }, height: { ideal: 1280 } } };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streamRef.current = stream; setCameraOpen(true);
-      if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play(); } catch {} }
+      try { const st = await navigator.permissions?.query?.({ name: "camera" }); if (st && st.state === "denied") { setCameraError("カメラがブロックされています。許可してください。"); return; } } catch { }
+
+      if (mode == "environment" && targets.length == 1) {
+        const constraints = { audio: false, video: { deviceId: { exact: targets[0].deviceId }, width: { ideal: 1280 }, height: { ideal: 1280 } } };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        streamRef.current = stream; setCameraOpen(true);
+        if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play(); } catch { console.log("referror"); } }
+      } else {
+        const constraints = { audio: false, video: { facingMode: { ideal: mode }, width: { ideal: 1280 }, height: { ideal: 1280 } } };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        streamRef.current = stream; setCameraOpen(true);
+        if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play(); } catch { console.log("referror"); } }
+      }
     } catch (e) { console.error(e); setCameraError(e?.message || String(e)); setCameraOpen(false); }
   }
+
   function stopCamera() {
     if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraOpen(false);
   }
+
   function downscaleAndToBlob(video, maxSide = 1280, quality = 0.92) {
     const w = video.videoWidth, h = video.videoHeight;
     if (!w || !h) return Promise.resolve(null);
@@ -320,6 +466,7 @@ export default function MintNFTPage() {
     const ctx = canvas.getContext("2d"); ctx.drawImage(video, 0, 0, W, H);
     return new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", quality));
   }
+
   const takePhoto = async () => {
     try {
       const video = videoRef.current; if (!video) return;
@@ -425,7 +572,7 @@ export default function MintNFTPage() {
     const latStr = (latDeg ?? "").trim();
     const lonStr = (lonDeg ?? "").trim();
     const ok = latStr.length > 0 && lonStr.length > 0 &&
-               Number.isFinite(parseFloat(latStr)) && Number.isFinite(parseFloat(lonStr));
+      Number.isFinite(parseFloat(latStr)) && Number.isFinite(parseFloat(lonStr));
     return ok
       ? { latIntDisp: Math.round(parseFloat(latStr) * 1000), lonIntDisp: Math.round(parseFloat(lonStr) * 1000) }
       : { latIntDisp: "-", lonIntDisp: "-" };
@@ -462,6 +609,15 @@ export default function MintNFTPage() {
   return (
     <div className="div_base" style={{ minHeight: "100vh", overflowY: "auto" }}>
       <div className="div_header">Flora Observation: 画像→IPFS(CID)→store TX（Neutron Testnet）</div>
+
+      <button type="button" onClick={listing}>画像取得</button>
+      <div style={{ display: "flex", flexWrap: "wrap", width: clientWidth, margin: "8px" }}>
+        {items.map(item => (
+          <div key={item.id} style={{ position: "relative", margin: "8px", width: itemWidth, height: itemWidth, cursor: "pointer", userSelect: "none" }}>
+            <img style={{ objectFit: "cover", width: itemWidth, height: itemWidth }} src={('https://ipfs.yamada.jo.sus.ac.jp/ipfs/' + item.cid)} />
+          </div>
+        ))}
+      </div>
 
       <div className="div_content" style={{ overflow: "visible" }}>
         <div style={{ width: clientWidth, margin: "8px auto" }}>
@@ -512,7 +668,7 @@ export default function MintNFTPage() {
                 </div>
                 <div>
                   生育状態（life_status）:
-                  <select value={lifeStatus} onChange={(e) => setLifeStatus(e.target.value)} style={{ width: "100%" }}>
+                  <select value={lifeStatus} onChange={(e) => setLifeStatus(e.target.value)}>
                     <option value="野生">野生</option>
                     <option value="栽培">栽培</option>
                     <option value="植栽">植栽</option>
@@ -550,11 +706,7 @@ export default function MintNFTPage() {
 
               <div>
                 カテゴリ（category）:
-                <select
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  style={{ width: "100%" }}
-                >
+                <select value={category} onChange={(e) => setCategory(e.target.value)}>
                   <option value="" disabled>選択してください</option>
                   <option value="不明">不明</option>
                   <option value="鳥類">鳥類</option>
@@ -604,7 +756,7 @@ export default function MintNFTPage() {
                   <button type="button" onClick={fillCurrentLocation}>現在地</button>
                 </div>
                 <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-                  ※ どちらかが空欄/不正なら <code>place</code> は送信に含めません（エラーになりません）。<br/>
+                  ※ どちらかが空欄/不正なら <code>place</code> は送信に含めません（エラーになりません）。<br />
                   送信値プレビュー: lat={latIntDisp} / lon={lonIntDisp}（度×1000）
                 </div>
               </div>
@@ -634,10 +786,7 @@ export default function MintNFTPage() {
             <div style={{ fontWeight: 600, marginBottom: 6 }}>画像 → IPFS（CID取得）</div>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <input id="capture-input" type="file" accept="image/*" capture="environment" onChange={onSelectFile} style={{ display: "none" }} />
-              <label htmlFor="capture-input"><button type="button">カメラで撮影（簡易）</button></label>
               <button type="button" onClick={() => startCamera("environment")} disabled={cameraOpen}>カメラを起動（背面）</button>
-              <button type="button" onClick={() => startCamera("user")} disabled={cameraOpen}>カメラを起動（前面）</button>
               <button type="button" onClick={() => document.getElementById("file-picker")?.click()} disabled={cameraOpen}>ファイルから選択</button>
               <input id="file-picker" type="file" accept="image/*" onChange={onSelectFile} style={{ display: "none" }} />
             </div>
@@ -673,7 +822,7 @@ export default function MintNFTPage() {
           {/* 送信（execute store） */}
           <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: 8 }}>
             <div style={{ fontWeight: 600, marginBottom: 6 }}>コントラクトへ送信</div>
-            <button type="button" onClick={handleStore} disabled={sending || !connected || !cidImage}>
+            <button type="button" onClick={handleStore} disabled={sending || !connected}>
               {sending ? "送信中…" : "store TX を送る"}
             </button>
             <div style={{ fontSize: 13, marginTop: 8 }}>
@@ -684,11 +833,7 @@ export default function MintNFTPage() {
             </div>
           </div>
 
-          {message && (
-            <div style={{ marginTop: 8, padding: 10, background: "#f3f7ea", border: "1px solid #ABCE1C", borderRadius: 6 }}>
-              {message}
-            </div>
-          )}
+          {message && (<div style={{ marginTop: 8, padding: 10, background: "#f3f7ea", border: "1px solid #ABCE1C", borderRadius: 6 }}>{message}</div>)}
         </div>
       </div>
 
@@ -704,10 +849,7 @@ export default function MintNFTPage() {
           onTouchMove={(e) => e.stopPropagation()}
         >
           <div style={{ color: "#fff", marginBottom: 8, fontWeight: 600 }}>カメラ撮影</div>
-          <video
-            ref={videoRef} playsInline muted autoPlay
-            style={{ width: "min(95vw, 480px)", height: "min(95vw, 480px)", background: "#000", borderRadius: 8, objectFit: "cover" }}
-          />
+          <video ref={videoRef} playsInline muted autoPlay style={{ width: "min(95vw, 480px)", height: "min(95vw, 480px)", background: "#000", borderRadius: 8, objectFit: "cover" }} />
           {cameraError && <div style={{ color: "#ffbdbd", marginTop: 6, fontSize: 12 }}>{cameraError}</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
             <button type="button" onClick={takePhoto}>シャッター</button>
@@ -727,28 +869,18 @@ export default function MintNFTPage() {
           <div>
             <div style={{ fontSize: 13, fontWeight: 600 }}>payload</div>
             <pre style={{ margin: 0, padding: 8, background: "#fff", border: "1px solid #eee", borderRadius: 6, overflow: "auto" }}>
-{JSON.stringify(finalPayload, null, 2)}
+              {JSON.stringify(finalPayload, null, 2)}
             </pre>
             <button type="button" onClick={() => copyJson(finalPayload)} style={{ marginTop: 6 }}>payload をコピー</button>
           </div>
           <div>
             <div style={{ fontSize: 13, fontWeight: 600 }}>store メッセージ</div>
             <pre style={{ margin: 0, padding: 8, background: "#fff", border: "1px solid #eee", borderRadius: 6, overflow: "auto" }}>
-{JSON.stringify(finalMsg, null, 2)}
+              {JSON.stringify(finalMsg, null, 2)}
             </pre>
             <button type="button" onClick={() => copyJson(finalMsg)} style={{ marginTop: 6 }}>メッセージをコピー</button>
           </div>
         </div>
-      </div>
-
-      {/* フッター（既存UI互換） */}
-      <div style={{ height: 2, backgroundColor: "#ABCE1C" }} />
-      <div style={{ height: 60, display: "flex" }}>
-        <div className="div_footer" role="button" onClick={() => navigate("/qr-reader")}><i className="material-icons">qr_code_scanner</i></div>
-        <div style={{ width: 2, backgroundColor: "#ABCE1C", margin: "10px 0" }} />
-        <div className="div_footer" role="button" onClick={() => navigate("/ipfs-upload-mint")}><i className="material-icons">upload_file</i></div>
-        <div style={{ width: 2, backgroundColor: "#ABCE1C", margin: "10px 0" }} />
-        <div className="div_footer" role="button" onClick={() => navigate("/ipfs-list")}><i className="material-icons">collections</i></div>
       </div>
     </div>
   );
