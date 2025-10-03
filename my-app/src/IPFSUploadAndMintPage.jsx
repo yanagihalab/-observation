@@ -12,7 +12,9 @@ import { toUtf8 } from "@cosmjs/encoding";
  * - 画像アップロードは DEV: /ipfs-upload → 失敗時 Azure直 / 本番: Azure直
  * - application/json 失敗時は text/plain で再試行（CORS/Preflight回避）
  * - payload.extras は「既存更新ではなく要素の追加」
- * - place は任意（緯度/経度が空または不正なら送信に含めない）
+ * - place は任意（緯度/経度が空/不正なら送信に含めない）
+ * - life_status / category が「その他」のとき詳細入力を追加し、payload に life_status_detail / category_detail を追加
+ * - テキストボックスは初期値なし（placeholder のみ表示）
  * - ページ最下部に最終メタデータ（payload / store msg）を表示
  * - TxHash は Mintscan（neutron-testnet）リンクで表示
  * - スクロールロックの付け外し（cameraOpen に連動）
@@ -25,15 +27,13 @@ const ENV = {
   DENOM_DECIMALS: 6,
   DISPLAY_DENOM: "NTRN",
   BECH32_PREFIX: "neutron",
-  GAS_PRICE: 0.025,      // --gas-prices 0.025untrn
-  GAS_ADJUSTMENT: 1.5,   // --gas-adjustment 1.5
-  // ★ 固定コントラクト
+  GAS_PRICE: 0.025,
+  GAS_ADJUSTMENT: 1.5,
   CONTRACT_ADDR: "neutron1n0h44yyn6lhswspgvgwn4nzak6q8aj5qx0vaj95k2n0pl4zlcv8qcwzcc3",
-  // Azure Functions（必要に応じて ?code=... を付与可）
   CUSTOM_UPLOAD_ENDPOINT: "https://fukaya-lab.azurewebsites.net/api/ipfs/upload",
 };
 
-// 参照定数
+// consts
 const CHAIN_ID = ENV.CHAIN_ID;
 const CHAIN_NAME = ENV.CHAIN_NAME;
 const DENOM = ENV.DENOM;
@@ -44,13 +44,12 @@ const GAS_PRICE_NUM = Number(ENV.GAS_PRICE);
 const GAS_ADJ = Number(ENV.GAS_ADJUSTMENT);
 const CONTRACT_ADDR = ENV.CONTRACT_ADDR;
 
-// Mintscan（固定リンク）
 const CONTRACT_EXPLORER_URL =
   `https://www.mintscan.io/neutron-testnet/address/${CONTRACT_ADDR}`;
 const TX_EXPLORER_BASE = "https://www.mintscan.io/neutron-testnet/txs/";
 const formatTxLink = (h) => (h ? `${TX_EXPLORER_BASE}${h}` : "");
 
-// RPC/REST 候補
+// RPC/REST
 const RPC_CANDIDATES = [
   "https://rpc-palvus.pion-1.ntrn.tech",
   "https://neutron-testnet-rpc.polkachu.com:443",
@@ -62,7 +61,7 @@ const REST_CANDIDATES = [
   "https://api.pion.remedy.tm.p2p.org",
 ];
 
-// DEV は Vite proxy 経由（/ipfs-upload → /api/ipfs/upload に rewrite）
+// DEV proxy
 const IS_DEV = typeof import.meta !== "undefined" && !!import.meta.env?.DEV;
 const DEV_PROXY_PATH = "/ipfs-upload";
 
@@ -95,7 +94,7 @@ function parseLocalDatetimeInputValue(s) {
   return Number.isFinite(t) ? Math.floor(t / 1000) : 0;
 }
 
-/** ==== アップロード系 ==== */
+/** ==== Uploader helpers ==== */
 function arrayBufferToBase64(buf) {
   const bytes = new Uint8Array(buf);
   let binary = "";
@@ -117,8 +116,6 @@ function extractCidFromResponse(j) {
   if (m) val = m[1];
   return val.replace(/^ipfs:\/\//i, "").replace(/^ipfs\//i, "");
 }
-
-/** DEV/PROD フォールバック付き：画像→CID */
 async function customUploadFileWithFallback(file) {
   const ab = await file.arrayBuffer();
   const base64 = arrayBufferToBase64(ab);
@@ -154,32 +151,37 @@ async function customUploadFileWithFallback(file) {
   throw Object.assign(new Error(msg), { detail: lastDetail });
 }
 
-/** ==== メイン UI ==== */
+/** ==== Main UI ==== */
 export default function MintNFTPage() {
   const navigate = useNavigate();
 
   // Wallet
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [owner, setOwner] = useState("");
+  const [owner, setOwner] = useState(""); // placeholder のみ表示
   const clientRef = useRef(null);
   const [rpcUrlUsed, setRpcUrlUsed] = useState("");
 
-  // Payload（CLI準拠）
+  // Payload（CLI準拠）— テキストは初期値なし（placeholder のみ）
   const [observedAtSec, setObservedAtSec] = useState(nowUnixSec());
-  const [speciesScientific, setSpeciesScientific] = useState("Prunus mume");
-  const [nameJa, setNameJa] = useState("ウメ");
-  const [category, setCategory] = useState("植物");
-  const [lifeStatus, setLifeStatus] = useState("野生");
-  const [notes, setNotes] = useState("東京駅付近");
+  const [speciesScientific, setSpeciesScientific] = useState("");
+  const [nameJa, setNameJa] = useState("");
 
-  // 追加メタ（追加のみ）
+  // ▼ カテゴリと生育状態（「その他」選択時は詳細欄）
+  const [category, setCategory] = useState(""); // 未選択から開始
+  const [categoryDetail, setCategoryDetail] = useState("");
+  const [lifeStatus, setLifeStatus] = useState("野生"); // 既定は野生のまま
+  const [lifeStatusDetail, setLifeStatusDetail] = useState("");
+
+  const [notes, setNotes] = useState("");
+
+  // 追加メタ（追加のみ／placeholder）
   const [extras, setExtras] = useState([{ key: "", value: "" }]);
   const addExtra = () => setExtras((p) => [...p, { key: "", value: "" }]);
   const removeExtra = (i) => setExtras((p) => p.filter((_, idx) => idx !== i));
   const updateExtra = (i, k, v) => setExtras((p) => p.map((e, idx) => idx === i ? { ...e, [k]: v } : e));
 
-  // 場所（任意・空欄可／初期=空＝null相当）
+  // 場所（任意・空欄可）
   const [latDeg, setLatDeg] = useState("");
   const [lonDeg, setLonDeg] = useState("");
   const fillCurrentLocation = async () => {
@@ -277,8 +279,7 @@ export default function MintNFTPage() {
       const offlineSigner = await window.keplr.getOfflineSignerAuto(CHAIN_ID);
       const [{ address }] = await offlineSigner.getAccounts();
       const gasPrice = GasPrice.fromString(`${GAS_PRICE_NUM}${DENOM}`);
-      const client = await SigningCosmWasmClient.connectWithSinger?.(rpcUrl, offlineSigner, { gasPrice, prefix: BECH32_PREFIX })
-        || await SigningCosmWasmClient.connectWithSigner(rpcUrl, offlineSigner, { gasPrice, prefix: BECH32_PREFIX });
+      const client = await SigningCosmWasmClient.connectWithSigner(rpcUrl, offlineSigner, { gasPrice, prefix: BECH32_PREFIX });
       clientRef.current = client;
       setOwner(address);
       setConnected(true);
@@ -383,9 +384,11 @@ export default function MintNFTPage() {
       const payload = {
         observed_at: Number(observedAtSec),
         species: { scientific: String(speciesScientific || "").trim(), vernacular_ja: String(nameJa || "").trim() },
-        category: String(category || "").trim(),
+        ...(category ? { category: String(category) } : {}),
         life_status: String(lifeStatus || "").trim(),
-        notes: String(notes || "").trim(),
+        ...(notes ? { notes: String(notes).trim() } : {}),
+        ...(category === "その他" && categoryDetail.trim() ? { category_detail: categoryDetail.trim() } : {}),
+        ...(lifeStatus === "その他" && lifeStatusDetail.trim() ? { life_status_detail: lifeStatusDetail.trim() } : {}),
         ...(hasLatLon ? { place: { lat: latInt, lon: lonInt } } : {}),
         ...(extrasFiltered.length ? { extras: extrasFiltered } : {}),
       };
@@ -439,13 +442,15 @@ export default function MintNFTPage() {
     return {
       observed_at: Number(observedAtSec),
       species: { scientific: String(speciesScientific || "").trim(), vernacular_ja: String(nameJa || "").trim() },
-      category: String(category || "").trim(),
+      ...(category ? { category: String(category) } : {}),
       life_status: String(lifeStatus || "").trim(),
-      notes: String(notes || "").trim(),
+      ...(notes ? { notes: String(notes).trim() } : {}),
+      ...(category === "その他" && categoryDetail.trim() ? { category_detail: categoryDetail.trim() } : {}),
+      ...(lifeStatus === "その他" && lifeStatusDetail.trim() ? { life_status_detail: lifeStatusDetail.trim() } : {}), // safe: life_status key exists
       ...(hasLatLon ? { place: { lat: Math.round(parseFloat(latStr) * 1000), lon: Math.round(parseFloat(lonStr) * 1000) } } : {}),
       ...(extrasFiltered.length ? { extras: extrasFiltered } : {}),
     };
-  }, [observedAtSec, speciesScientific, nameJa, category, lifeStatus, notes, latDeg, lonDeg, extras]);
+  }, [observedAtSec, speciesScientific, nameJa, category, categoryDetail, lifeStatus, lifeStatusDetail, notes, latDeg, lonDeg, extras]);
 
   const finalMsg = useMemo(() => ({ store: { payload: finalPayload, cid: cidImage || "(CID未取得)" } }), [finalPayload, cidImage]);
 
@@ -473,7 +478,12 @@ export default function MintNFTPage() {
             </div>
             <div style={{ marginTop: 6, fontSize: 13 }}>
               送信者（Owner）:
-              <input style={{ width: "100%" }} placeholder="あなたのアドレス" value={owner} onChange={(e) => setOwner(e.target.value)} />
+              <input
+                style={{ width: "100%" }}
+                placeholder="例: neutron1..."
+                value={owner}
+                onChange={(e) => setOwner(e.target.value)}
+              />
             </div>
             <div style={{ marginTop: 6, fontSize: 13 }}>
               コントラクトアドレス（固定）:{" "}
@@ -486,8 +496,8 @@ export default function MintNFTPage() {
           {/* 観測ペイロード */}
           <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #eee", borderRadius: 8, background: "#fafafa" }}>
             <div style={{ fontWeight: 600, marginBottom: 6 }}>観測ペイロード</div>
-            <div style={{ display: "grid", gap: 8 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div style={{ display: "grid", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <div>
                   観測日時:
                   <input
@@ -508,18 +518,34 @@ export default function MintNFTPage() {
                     <option value="植栽">植栽</option>
                     <option value="その他">その他</option>
                   </select>
+                  {lifeStatus === "その他" && (
+                    <input
+                      style={{ width: "100%", marginTop: 6 }}
+                      placeholder="例: 半栽培・保全区域内 等"
+                      value={lifeStatusDetail}
+                      onChange={(e) => setLifeStatusDetail(e.target.value)}
+                    />
+                  )}
                 </div>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <div>
-                  学名（species.scientific）:
-                  <input style={{ width: "100%" }} value={speciesScientific} onChange={(e) => setSpeciesScientific(e.target.value)} />
-                </div>
-                <div>
-                  和名（species.vernacular_ja）:
-                  <input style={{ width: "100%" }} value={nameJa} onChange={(e) => setNameJa(e.target.value)} />
-                </div>
+              <div>
+                学名（species.scientific）:
+                <input
+                  style={{ width: "100%" }}
+                  placeholder="例: Prunus mume"
+                  value={speciesScientific}
+                  onChange={(e) => setSpeciesScientific(e.target.value)}
+                />
+              </div>
+              <div>
+                和名（species.vernacular_ja）:
+                <input
+                  style={{ width: "100%" }}
+                  placeholder="例: ウメ"
+                  value={nameJa}
+                  onChange={(e) => setNameJa(e.target.value)}
+                />
               </div>
 
               <div>
@@ -529,28 +555,52 @@ export default function MintNFTPage() {
                   onChange={(e) => setCategory(e.target.value)}
                   style={{ width: "100%" }}
                 >
-                  {/* 先頭を未選択にしたい場合は下の空optionを有効化してください */}
-                  {/* <option value="" disabled>選択してください</option> */}
+                  <option value="" disabled>選択してください</option>
+                  <option value="不明">不明</option>
+                  <option value="鳥類">鳥類</option>
+                  <option value="爬虫類または両生類">爬虫類または両生類</option>
+                  <option value="哺乳類">哺乳類</option>
+                  <option value="魚類">魚類</option>
+                  <option value="虫または甲殻類">虫または甲殻類</option>
                   <option value="植物">植物</option>
-                  <option value="動物">動物</option>
-                  <option value="菌類">菌類</option>
-                  <option value="藻類">藻類</option>
-                  <option value="地衣類">地衣類</option>
+                  <option value="菌類（キノコなど）">菌類（キノコなど）</option>
                   <option value="その他">その他</option>
                 </select>
+                {category === "その他" && (
+                  <input
+                    style={{ width: "100%", marginTop: 6 }}
+                    placeholder="例: 原生生物・コケ植物 等"
+                    value={categoryDetail}
+                    onChange={(e) => setCategoryDetail(e.target.value)}
+                  />
+                )}
               </div>
 
               <div>
                 備考（notes）:
-                <textarea rows={2} style={{ width: "100%" }} value={notes} onChange={(e) => setNotes(e.target.value)} />
+                <textarea
+                  rows={2}
+                  style={{ width: "100%" }}
+                  placeholder="例: 東京駅付近"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                />
               </div>
 
               {/* 場所（任意、空欄OK） */}
-              <div style={{ marginTop: 8 }}>
+              <div>
                 <div style={{ fontWeight: 600, marginBottom: 6 }}>場所（任意）</div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8 }}>
-                  <input placeholder="緯度（度） 例: 35.681" value={latDeg} onChange={(e) => setLatDeg(e.target.value)} />
-                  <input placeholder="経度（度） 例: 139.767" value={lonDeg} onChange={(e) => setLonDeg(e.target.value)} />
+                  <input
+                    placeholder="緯度（度） 例: 35.681"
+                    value={latDeg}
+                    onChange={(e) => setLatDeg(e.target.value)}
+                  />
+                  <input
+                    placeholder="経度（度） 例: 139.767"
+                    value={lonDeg}
+                    onChange={(e) => setLonDeg(e.target.value)}
+                  />
                   <button type="button" onClick={fillCurrentLocation}>現在地</button>
                 </div>
                 <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
@@ -560,15 +610,15 @@ export default function MintNFTPage() {
               </div>
 
               {/* 追加メタデータ（追加のみ） */}
-              <div style={{ marginTop: 8 }}>
+              <div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <div style={{ fontWeight: 600 }}>追加メタデータ（extras）</div>
                   <button type="button" onClick={addExtra}>行を追加</button>
                 </div>
                 {extras.map((e, idx) => (
                   <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, marginTop: 6 }}>
-                    <input placeholder="key" value={e.key} onChange={(ev) => updateExtra(idx, "key", ev.target.value)} />
-                    <input placeholder="value" value={e.value} onChange={(ev) => updateExtra(idx, "value", ev.target.value)} />
+                    <input placeholder="例: exif.camera_model" value={e.key} onChange={(ev) => updateExtra(idx, "key", ev.target.value)} />
+                    <input placeholder="例: Canon EOS R50" value={e.value} onChange={(ev) => updateExtra(idx, "value", ev.target.value)} />
                     <button type="button" onClick={() => removeExtra(idx)}>削除</button>
                   </div>
                 ))}
@@ -584,15 +634,10 @@ export default function MintNFTPage() {
             <div style={{ fontWeight: 600, marginBottom: 6 }}>画像 → IPFS（CID取得）</div>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              {/* 簡易カメラ */}
               <input id="capture-input" type="file" accept="image/*" capture="environment" onChange={onSelectFile} style={{ display: "none" }} />
               <label htmlFor="capture-input"><button type="button">カメラで撮影（簡易）</button></label>
-
-              {/* 高機能カメラ */}
               <button type="button" onClick={() => startCamera("environment")} disabled={cameraOpen}>カメラを起動（背面）</button>
               <button type="button" onClick={() => startCamera("user")} disabled={cameraOpen}>カメラを起動（前面）</button>
-
-              {/* 通常ファイル */}
               <button type="button" onClick={() => document.getElementById("file-picker")?.click()} disabled={cameraOpen}>ファイルから選択</button>
               <input id="file-picker" type="file" accept="image/*" onChange={onSelectFile} style={{ display: "none" }} />
             </div>
@@ -666,7 +711,7 @@ export default function MintNFTPage() {
           {cameraError && <div style={{ color: "#ffbdbd", marginTop: 6, fontSize: 12 }}>{cameraError}</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
             <button type="button" onClick={takePhoto}>シャッター</button>
-            <button type="button" onClick={() => startCamera(facingMode === "environment" ? "user" : "environment")}>前/背面 切替</button>
+            <button type="button" onClick={flipCamera}>前/背面 切替</button>
             <button type="button" onClick={() => stopCamera()}>キャンセル</button>
           </div>
           <div style={{ color: "#bbb", marginTop: 6, fontSize: 12 }}>
