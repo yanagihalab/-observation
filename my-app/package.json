@@ -6,6 +6,7 @@
   },
   "dependencies": {
     "@cosmjs/stargate": "^0.33.1",
+    "@cosmjs/tendermint-rpc": "^0.33.1", 
     "@cosmjs/cosmwasm-stargate": "^0.33.1",
     "jsqr": "^1.4.0",
     "react": "^18.2.0",
