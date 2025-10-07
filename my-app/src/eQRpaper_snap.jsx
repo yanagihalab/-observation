@@ -1,4 +1,4 @@
-// src/eQRpaper.jsx
+// src/eQRpaper.jsx (or eQRpaper_snap.jsx)
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Html5QrcodeScanner } from "html5-qrcode";
 import { SigningCosmWasmClient } from "@cosmjs/cosmwasm-stargate";
@@ -6,12 +6,13 @@ import { GasPrice, calculateFee } from "@cosmjs/stargate";
 import { toUtf8 } from "@cosmjs/encoding";
 
 /**
- * e-QRpaper (強制ステップ版)
- * 1) QRスキャン（必須）
+ * e-QRpaper (必須ステップ版 + メトリクス計測)
+ * 1) QRスキャン（必須）… JSONから name/description/unique_id/qr_id/observed_at を取得
  * 2) Keplr接続（必須）
  * 3) コントラクトへ送信（必須）
- * - payload: 固定 name/description + unique_id/qr_id/observed_at
- * - cid: 固定値（非表示）
+ * - payload: QR由来の name/description + unique_id/qr_id/observed_at
+ * - cid: 固定値（非表示で常に付与）
+ * - Metrics: QR読取 → Txハッシュ取得 の所要時間を localStorage に保存・集計・CSV出力
  */
 
 // ── 環境設定 ─────────────────────────────────────────────
@@ -31,7 +32,7 @@ const ENV = {
 const FIXED_CID = "QmTuDCtiZJjRFqiZ6D5X2iNX8ejwNu6Kv1F7EcThej8yHu";
 
 // ★ QRスキャナ表示サイズ（コンパクト）
-const SCAN_PANEL = { width: 320, height: 220, qrbox: 220 };
+const SCAN_PANEL = { width: 320, height: 360, qrbox: 220 };
 
 const CHAIN_ID = ENV.CHAIN_ID;
 const CHAIN_NAME = ENV.CHAIN_NAME;
@@ -82,50 +83,99 @@ function parseLocalDatetimeInputValue(s) {
   return Number.isFinite(t) ? Math.floor(t / 1000) : 0;
 }
 
+// ── Metrics helpers ─────────────────────────────────────
+const LS_KEY = "eqr_metrics_v1";
+function loadMetrics() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || "[]"); } catch { return []; }
+}
+function saveMetrics(arr) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch {}
+}
+function toCsv(rows) {
+  const header = ["scan_time_iso","tx_time_iso","duration_ms","duration_s","txhash","name","description","unique_id","qr_id"];
+  const escape = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
+  const lines = rows.map(r => [
+    escape(new Date(r.scan_at).toISOString()),
+    escape(new Date(r.tx_at).toISOString()),
+    r.ms,
+    (r.ms/1000).toFixed(3),
+    escape(r.txhash),
+    escape(r.name),
+    escape(r.description),
+    escape(r.unique_id),
+    escape(r.qr_id),
+  ].join(","));
+  return [header.join(","), ...lines].join("\n");
+}
+function statsFrom(durationsMs) {
+  if (!durationsMs.length) return null;
+  const arr = durationsMs.slice().sort((a,b)=>a-b);
+  const n = arr.length;
+  const sum = arr.reduce((a,b)=>a+b,0);
+  const avg = sum/n;
+  const min = arr[0], max = arr[n-1];
+  const pick = (p) => arr[Math.min(n-1, Math.floor(p*(n-1)))];
+  const med = pick(0.5), p90 = pick(0.9), p95 = pick(0.95), p99 = pick(0.99);
+  return { n, avg, min, max, med, p90, p95, p99 };
+}
+
 // ── Component ───────────────────────────────────────────
 export default function EQRpaper() {
-  // ===== ステップ状態 =====
-  // Step1: QRスキャン
-  const [scannerOpen, setScannerOpen] = useState(true); // 初期表示で開く
+  // ステップ状態
+  const [scannerOpen, setScannerOpen] = useState(true); // 初期状態でスキャナを開く
   const [qrWidth, setQrWidth] = useState(SCAN_PANEL.width);
   const [qrHeight, setQrHeight] = useState(SCAN_PANEL.height);
   const [lastQrRaw, setLastQrRaw] = useState("");
 
-  const FIXED_NAME = "Yama eQRpaper log";
-  const FIXED_DESC = "入山記録の入り口位置情報証明";
+  // フォーム（QRから反映／編集可）
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [uniqueId, setUniqueId] = useState("");
   const [qrId, setQrId] = useState("");
   const [observedAtSec, setObservedAtSec] = useState(nowUnixSec()); // 必須（u64秒）
 
-  // Step2: Keplr接続
+  // Keplr / Client
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [owner, setOwner] = useState("");
   const clientRef = useRef(null);
   const [rpcUrlUsed, setRpcUrlUsed] = useState("");
 
-  // Step3: 送信
+  // 送信
   const [sending, setSending] = useState(false);
   const [txHash, setTxHash] = useState("");
   const [message, setMessage] = useState("");
 
+  // 計測：QR読取時刻 → Txハッシュ取得時刻
+  const [scanStartedAt, setScanStartedAt] = useState(null); // ms (Date.now)
+  const [metrics, setMetrics] = useState([]);               // 記録配列
+
+  // 初回ロードでメトリクス復元
+  useEffect(() => { setMetrics(loadMetrics()); }, []);
+
   // ステップ完了条件
   const step1Done = useMemo(
-    () => Boolean(uniqueId && qrId && Number.isFinite(Number(observedAtSec))),
-    [uniqueId, qrId, observedAtSec]
+    () => Boolean(name && description && uniqueId && qrId && Number.isFinite(Number(observedAtSec))),
+    [name, description, uniqueId, qrId, observedAtSec]
   );
   const step2Done = connected;
   const step3Ready = step1Done && step2Done;
 
-  // ===== QR成功時：unique_id / qr_id / observed_at を取り込み =====
+  // ===== QR成功時：name / description / unique_id / qr_id / observed_at を取り込み =====
   const handleQrScanSuccess = (decodedText) => {
     setLastQrRaw(decodedText);
     try {
       const j = JSON.parse(decodedText);
+      const n = j.name ?? j.title ?? "";
+      const d = j.description ?? j.desc ?? j.detail ?? "";
       const u = j.unique_id ?? j.uniqueId ?? j.uid ?? "";
       const q = j.qr_id ?? j.qrId ?? j.qrid ?? j.qr ?? "";
+
+      if (n) setName(String(n));
+      if (d) setDescription(String(d));
       setUniqueId(String(u || ""));
       setQrId(String(q || ""));
+
       if (j.observed_at != null) {
         if (typeof j.observed_at === "number") setObservedAtSec(j.observed_at);
         else if (typeof j.observed_at === "string") {
@@ -133,9 +183,13 @@ export default function EQRpaper() {
           if (Number.isFinite(t)) setObservedAtSec(Math.floor(t / 1000));
         }
       }
-      setMessage("✅ QR読み取り完了：フォームへ反映しました。次は【Step 2】Keplrに接続を実行してください。");
+
+      // ★ 計測開始点をセット（ユーザ操作時間も含めた総所要時間）
+      setScanStartedAt(Date.now());
+
+      setMessage("✅ QR読み取り完了：name/description ほかをフォームへ反映しました。次は【Step 2】Keplr接続へ。");
     } catch {
-      setMessage("⚠️ このQRはJSONではありません。JSONを含むQRを読み取ってください。");
+      setMessage("⚠️ このQRはJSONではありません。name/description等を含むJSONのQRを読み取ってください。");
     }
     setScannerOpen(false);
   };
@@ -170,12 +224,12 @@ export default function EQRpaper() {
 
   // 送信（execute store）：cid は FIXED_CID を常に付与
   const execPayload = useMemo(() => ({
-    name: FIXED_NAME,
-    description: FIXED_DESC,
+    name,
+    description,
     unique_id: uniqueId,
     qr_id: qrId,
     observed_at: Number(observedAtSec),
-  }), [uniqueId, qrId, observedAtSec]);
+  }), [name, description, uniqueId, qrId, observedAtSec]);
 
   const execMsg = useMemo(() => ({
     store: { payload: execPayload, cid: FIXED_CID }
@@ -205,6 +259,24 @@ export default function EQRpaper() {
       const txhash = res?.transactionHash || res?.hash || "";
       setTxHash(txhash);
       setMessage("✅ 送信しました。");
+
+      // ★ 計測: Tx 取得時に記録
+      if (scanStartedAt) {
+        const txAt = Date.now();
+        const rec = {
+          scan_at: scanStartedAt,
+          tx_at: txAt,
+          ms: txAt - scanStartedAt,
+          txhash,
+          name,
+          description,
+          unique_id: uniqueId,
+          qr_id: qrId,
+        };
+        const next = [rec, ...metrics].slice(0, 5000); // 最大5000件保持
+        setMetrics(next);
+        saveMetrics(next);
+      }
     } catch (err) {
       setMessage(`❌ ${err?.message || err}`);
     } finally {
@@ -212,7 +284,7 @@ export default function EQRpaper() {
     }
   };
 
-  // Keplr 接続
+  // Keplr 接続（Step 1 完了後に実行可）
   const connectKeplr = async () => {
     try {
       if (!step1Done) { setMessage("⚠️ 先に【Step 1】QRスキャンを完了してください。"); return; }
@@ -257,7 +329,7 @@ export default function EQRpaper() {
     }
   };
 
-  // ── UI: ステップ見出しスタイル ──────────────────────────
+  // ── UI: ステップ見出しカード ──────────────────────────
   const StepCard = ({ step, title, required = true, done, blocked, children }) => (
     <div
       style={{
@@ -288,6 +360,23 @@ export default function EQRpaper() {
     </div>
   );
 
+  // ── Metrics UI ────────────────────────────────────────
+  const latest = metrics.slice(0, 50);
+  const stat = statsFrom(metrics.map(m=>m.ms)) || { n:0, avg:0, min:0, max:0, med:0, p90:0, p95:0, p99:0 };
+
+  const downloadCsv = () => {
+    const csv = toCsv(metrics);
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `eqr_metrics_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+  const resetMetrics = () => {
+    if (!confirm("計測記録を全て削除します。よろしいですか？")) return;
+    setMetrics([]); saveMetrics([]);
+  };
+
   return (
     <div className="div_base" style={{ minHeight: "100vh", overflowY: "auto" }}>
       <div className="div_header">
@@ -303,14 +392,11 @@ export default function EQRpaper() {
         blocked={!step1Done}
       >
         <div style={{ marginBottom: 8, color: step1Done ? "#166534" : "#b45309" }}>
-          スキャン成功時は <code>unique_id</code> / <code>qr_id</code> / <code>observed_at</code> を自動反映します。
+          スキャン成功時：<code>name</code> / <code>description</code> / <code>unique_id</code> / <code>qr_id</code> / <code>observed_at</code> を自動反映。<br/>
+          ※ この時刻が「計測開始時刻」になります（Txハッシュ取得までの総時間を測定）。
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button
-            type="button"
-            onClick={() => setScannerOpen((v) => !v)}
-            style={{ padding: "8px 12px", borderRadius: 8 }}
-          >
+          <button type="button" onClick={() => setScannerOpen((v) => !v)} style={{ padding: "8px 12px", borderRadius: 8 }}>
             {scannerOpen ? "QRスキャナを閉じる" : "QRスキャナを開く"}
           </button>
         </div>
@@ -319,12 +405,8 @@ export default function EQRpaper() {
             <div
               id="qr-camera-reader"
               style={{
-                width: qrWidth,
-                height: qrHeight,
-                margin: "8px auto",
-                border: "1px solid #e5e7eb",
-                borderRadius: 8,
-                background: "#fff",
+                width: qrWidth, height: qrHeight, margin: "8px auto",
+                border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff",
               }}
             />
           </div>
@@ -333,18 +415,20 @@ export default function EQRpaper() {
         {/* フォーム（編集可） */}
         <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
           <div>
-            name（固定）：<code>{FIXED_NAME}</code>
+            name：
+            <input style={{ width: "100%" }} value={name} onChange={(e) => setName(e.target.value)} placeholder="(QRから取得 / 手入力可)" />
           </div>
           <div>
-            description（固定）：<code>{FIXED_DESC}</code>
+            description：
+            <input style={{ width: "100%" }} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="(QRから取得 / 手入力可)" />
           </div>
           <div>
             unique_id：
-            <input style={{ width: "100%" }} value={uniqueId} onChange={(e) => setUniqueId(e.target.value)} />
+            <input style={{ width: "100%" }} value={uniqueId} onChange={(e) => setUniqueId(e.target.value)} placeholder="(QRから取得 / 手入力可)" />
           </div>
           <div>
             qr_id：
-            <input style={{ width: "100%" }} value={qrId} onChange={(e) => setQrId(e.target.value)} />
+            <input style={{ width: "100%" }} value={qrId} onChange={(e) => setQrId(e.target.value)} placeholder="(QRから取得 / 手入力可)" />
           </div>
           <div>
             観測日時（observed_at）：
@@ -369,14 +453,52 @@ export default function EQRpaper() {
         done={step2Done}
         blocked={!step1Done}
       >
-        {!step1Done && (
-          <div style={{ color: "#dc2626", marginBottom: 8 }}>
-            ※ 先に <b>Step 1: QRスキャン</b> を完了してください。
-          </div>
-        )}
+        {!step1Done && <div style={{ color: "#dc2626", marginBottom: 8 }}>※ 先に <b>Step 1: QRスキャン</b> を完了してください。</div>}
         <button
           type="button"
-          onClick={connectKeplr}
+          onClick={async () => {
+            if (!step1Done) { setMessage("⚠️ 先に【Step 1】QRスキャンを完了してください。"); return; }
+            try {
+              setConnecting(true); setMessage("");
+              const rpcUrl = await firstReachable(RPC_CANDIDATES, "rpc");
+              const restUrl = await firstReachable(REST_CANDIDATES, "rest");
+              setRpcUrlUsed(rpcUrl);
+              if (!window.keplr) throw new Error("Keplrが見つかりません。");
+
+              if (window.keplr.experimentalSuggestChain) {
+                await window.keplr.experimentalSuggestChain({
+                  chainId: CHAIN_ID, chainName: CHAIN_NAME, rpc: rpcUrl, rest: restUrl,
+                  bip44: { coinType: 118 },
+                  bech32Config: {
+                    bech32PrefixAccAddr: BECH32_PREFIX,
+                    bech32PrefixAccPub: `${BECH32_PREFIX}pub`,
+                    bech32PrefixValAddr: `${BECH32_PREFIX}valoper`,
+                    bech32PrefixValPub: `${BECH32_PREFIX}valoperpub`,
+                    bech32PrefixConsAddr: `${BECH32_PREFIX}valcons`,
+                    bech32PrefixConsPub: `${BECH32_PREFIX}valconspub`,
+                  },
+                  currencies: [{ coinDenom: DISPLAY_DENOM, coinMinimalDenom: DENOM, coinDecimals: Number(ENV.DENOM_DECIMALS) }],
+                  feeCurrencies: [{ coinDenom: DISPLAY_DENOM, coinMinimalDenom: DENOM, coinDecimals: Number(ENV.DENOM_DECIMALS), gasPriceStep: { low: 0.01, average: GAS_PRICE_NUM, high: 0.04 } }],
+                  stakeCurrency: { coinDenom: DISPLAY_DENOM, coinMinimalDenom: DENOM, coinDecimals: Number(ENV.DENOM_DECIMALS) },
+                  features: ["cosmwasm"],
+                });
+              }
+
+              await window.keplr.enable(CHAIN_ID);
+              const offlineSigner = await window.keplr.getOfflineSignerAuto(CHAIN_ID);
+              const [{ address }] = await offlineSigner.getAccounts();
+              const gasPrice = GasPrice.fromString(`${GAS_PRICE_NUM}${DENOM}`);
+              const client = await SigningCosmWasmClient.connectWithSigner(rpcUrl, offlineSigner, { gasPrice, prefix: BECH32_PREFIX });
+              clientRef.current = client;
+              setOwner(address);
+              setConnected(true);
+              setMessage("✅ Keplr接続完了。次は【Step 3】コントラクトへ送信を実行してください。");
+            } catch (err) {
+              setMessage(`❌ Keplr接続に失敗: ${err?.message || err}`);
+            } finally {
+              setConnecting(false);
+            }
+          }}
           disabled={!step1Done || connecting || step2Done}
           style={{
             padding: "10px 14px",
@@ -389,11 +511,7 @@ export default function EQRpaper() {
         >
           {step2Done ? "接続済み" : connecting ? "接続中…" : "Keplr に接続（必須）"}
         </button>
-        {rpcUrlUsed && step2Done && (
-          <div style={{ fontSize: 12, color: "#166534", marginTop: 6 }}>
-            RPC: {rpcUrlUsed}
-          </div>
-        )}
+        {rpcUrlUsed && step2Done && <div style={{ fontSize: 12, color: "#166534", marginTop: 6 }}>RPC: {rpcUrlUsed}</div>}
       </StepCard>
 
       {/* Step 3 */}
@@ -404,11 +522,7 @@ export default function EQRpaper() {
         done={Boolean(txHash)}
         blocked={!step2Done}
       >
-        {!step2Done && (
-          <div style={{ color: "#dc2626", marginBottom: 8 }}>
-            ※ 先に <b>Step 2: Keplr接続</b> を完了してください。
-          </div>
-        )}
+        {!step2Done && <div style={{ color: "#dc2626", marginBottom: 8 }}>※ 先に <b>Step 2: Keplr接続</b> を完了してください。</div>}
         <button
           type="button"
           onClick={handleStore}
@@ -437,6 +551,72 @@ export default function EQRpaper() {
           {message}
         </div>
       )}
+
+      {/* Metrics 集計表示 */}
+      <div style={{ margin: "12px 8px", padding: 12, border: "1px solid #e5e7eb", borderRadius: 10, background: "#fafafa" }}>
+        <div style={{ fontWeight: 800, marginBottom: 8 }}>⏱️ 計測集計（QR→TxHash）</div>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 14 }}>
+          <span>count: <b>{stat.n}</b></span>
+          <span>avg: <b>{(stat.avg/1000).toFixed(3)}s</b></span>
+          <span>min: <b>{(stat.min/1000).toFixed(3)}s</b></span>
+          <span>median: <b>{(stat.med/1000).toFixed(3)}s</b></span>
+          <span>p90: <b>{(stat.p90/1000).toFixed(3)}s</b></span>
+          <span>p95: <b>{(stat.p95/1000).toFixed(3)}s</b></span>
+          <span>max: <b>{(stat.max/1000).toFixed(3)}s</b></span>
+        </div>
+
+        <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={downloadCsv} disabled={!metrics.length} style={{ padding: "6px 10px", borderRadius: 8 }}>
+            CSVダウンロード
+          </button>
+          <button onClick={resetMetrics} disabled={!metrics.length} style={{ padding: "6px 10px", borderRadius: 8, color: "#b91c1c", border: "1px solid #e5e7eb" }}>
+            全削除（リセット）
+          </button>
+        </div>
+
+        <div style={{ marginTop: 10, borderTop: "1px dashed #ddd", paddingTop: 10 }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>最新50件</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "#f1f5f9" }}>
+                  <th style={th}>#</th>
+                  <th style={th}>scan_at</th>
+                  <th style={th}>tx_at</th>
+                  <th style={th}>duration</th>
+                  <th style={th}>txhash</th>
+                  <th style={th}>unique_id</th>
+                  <th style={th}>qr_id</th>
+                  <th style={th}>name</th>
+                  <th style={th}>description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {latest.map((r, i) => (
+                  <tr key={`${r.txhash}-${i}`} style={{ background: i%2? "#fff":"#f9fafb" }}>
+                    <td style={td}>{metrics.length - i}</td>
+                    <td style={td}>{new Date(r.scan_at).toLocaleString()}</td>
+                    <td style={td}>{new Date(r.tx_at).toLocaleString()}</td>
+                    <td style={td}>{(r.ms/1000).toFixed(3)}s</td>
+                    <td style={td}><code style={{fontSize:12}}>{r.txhash}</code></td>
+                    <td style={td}><code style={{fontSize:12}}>{r.unique_id}</code></td>
+                    <td style={td}><code style={{fontSize:12}}>{r.qr_id}</code></td>
+                    <td style={td}>{r.name}</td>
+                    <td style={td}>{r.description}</td>
+                  </tr>
+                ))}
+                {!latest.length && (
+                  <tr><td style={td} colSpan={9}>(記録なし)</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
+
+// 表示用の軽量スタイル
+const th = { textAlign:"left", padding:"6px 8px", borderBottom:"1px solid #e5e7eb", fontSize:12 };
+const td = { padding:"6px 8px", borderBottom:"1px solid #f3f4f6", fontSize:12 };
