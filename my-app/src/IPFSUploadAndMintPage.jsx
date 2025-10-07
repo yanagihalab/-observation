@@ -257,8 +257,8 @@ async function customUploadFileWithFallback(file) {
 export default function MintNFTPage() {
   const navigate = useNavigate();
 
-
   const [items, setItems] = useState([]);
+  const [showPayload, setShowPayload] = useState(false);
 
   async function fetchAllCids() {
     const rpc = "https://rpc-palvus.pion-1.ntrn.tech:443".trim().replace(/\/$/, "");
@@ -274,7 +274,7 @@ export default function MintNFTPage() {
       console.log(res);
       const records = res?.records ?? [];
       for (const r of records) {
-        out.push({ id: r.id, cid: r.cid || "" });
+        out.push({ id: r.id, cid: (r.cid || ""), mine: (owner && (owner == r.sender)) });
       }
       const next = res?.next_start_after ?? null;
       if (!next) break;
@@ -282,8 +282,8 @@ export default function MintNFTPage() {
     }
     // id昇順で整列（任意）
     out.sort((a, b) => a.id - b.id);
-    console.log(out.filter(item => item.id >= 5));
-    setItems(out);
+    console.log(out);
+    setItems(out.filter(item => item.id >= 13));
   }
   const listing = async () => {
     await fetchAllCids();
@@ -371,7 +371,7 @@ export default function MintNFTPage() {
   useEffect(() => {
     const resize = () => {
       const client = document.documentElement.clientWidth - 16;
-      const columns = Math.max(1, Math.ceil(client / 400));
+      const columns = Math.max(1, Math.ceil(client / 320));
       setClientWidth(client);
       setItemWidth(client / columns - 16);
     };
@@ -426,9 +426,7 @@ export default function MintNFTPage() {
   // カメラ
   async function startCamera(mode) {
     try {
-      const devices = (await navigator.mediaDevices.enumerateDevices());
-      const targets = devices.filter(item => item.label == "Microsoft Camera Rear");
-
+      setCameraOpen(true);
       setCameraError("");
       setFacingMode(mode);
       if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") { setCameraError("HTTPS または localhost でアクセスしてください。"); return; }
@@ -436,15 +434,17 @@ export default function MintNFTPage() {
       if (!navigator.mediaDevices?.getUserMedia) { setCameraError("このブラウザはカメラに対応していません。"); return; }
       try { const st = await navigator.permissions?.query?.({ name: "camera" }); if (st && st.state === "denied") { setCameraError("カメラがブロックされています。許可してください。"); return; } } catch { }
 
+      const devices = (await navigator.mediaDevices.enumerateDevices());
+      const targets = devices.filter(item => item.label == "Microsoft Camera Rear");
       if (mode == "environment" && targets.length == 1) {
         const constraints = { audio: false, video: { deviceId: { exact: targets[0].deviceId }, width: { ideal: 1280 }, height: { ideal: 1280 } } };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        streamRef.current = stream; setCameraOpen(true);
+        streamRef.current = stream;
         if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play(); } catch { console.log("referror"); } }
       } else {
         const constraints = { audio: false, video: { facingMode: { ideal: mode }, width: { ideal: 1280 }, height: { ideal: 1280 } } };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        streamRef.current = stream; setCameraOpen(true);
+        streamRef.current = stream;
         if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play(); } catch { console.log("referror"); } }
       }
     } catch (e) { console.error(e); setCameraError(e?.message || String(e)); setCameraOpen(false); }
@@ -563,6 +563,9 @@ export default function MintNFTPage() {
       const txhash = result?.transactionHash || result?.hash || "";
       setTxHash(txhash);
       setMessage("観測データの保存TXを送信しました。");
+      setFile(null);
+      setCidImage("");
+      setPreview("");
     } catch (err) { console.error(err); setMessage(err?.message || String(err)); }
     finally { setSending(false); }
   };
@@ -609,232 +612,272 @@ export default function MintNFTPage() {
   return (
     <div className="div_base" style={{ minHeight: "100vh", overflowY: "auto" }}>
       <div className="div_header">Flora Observation: 画像→IPFS(CID)→store TX（Neutron Testnet）</div>
+      <div className="div_content">
 
-      <button type="button" onClick={listing}>画像取得</button>
-      <div style={{ display: "flex", flexWrap: "wrap", width: clientWidth, margin: "8px" }}>
-        {items.map(item => (
-          <div key={item.id} style={{ position: "relative", margin: "8px", width: itemWidth, height: itemWidth, cursor: "pointer", userSelect: "none" }}>
-            <img style={{ objectFit: "cover", width: itemWidth, height: itemWidth }} src={('https://ipfs.yamada.jo.sus.ac.jp/ipfs/' + item.cid)} />
-          </div>
-        ))}
-      </div>
-
-      <div className="div_content" style={{ overflow: "visible" }}>
-        <div style={{ width: clientWidth, margin: "8px auto" }}>
-          {/* ウォレット接続 / コントラクト（固定リンク付き） */}
-          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: "8px" }}>
-            <div style={{ fontWeight: 600, marginBottom: "6px" }}>ウォレット接続</div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <button type="button" disabled={connecting} onClick={connectKeplr}>
-                {connected ? "再接続" : "Keplrに接続"}
-              </button>
-              <div style={{ fontSize: 12, color: "#666" }}>
-                Chain: <b>{CHAIN_NAME}</b> ({CHAIN_ID}) {rpcUrlUsed ? `— RPC: ${rpcUrlUsed}` : ""}
-              </div>
-            </div>
-            <div style={{ marginTop: 6, fontSize: 13 }}>
-              送信者（Owner）:
-              <input
-                style={{ width: "100%" }}
-                placeholder="例: neutron1..."
-                value={owner}
-                onChange={(e) => setOwner(e.target.value)}
-              />
-            </div>
-            <div style={{ marginTop: 6, fontSize: 13 }}>
-              コントラクトアドレス（固定）:{" "}
-              <a href={CONTRACT_EXPLORER_URL} target="_blank" rel="noreferrer">
-                <code>{CONTRACT_ADDR}</code>
-              </a>
+        {/* ウォレット接続 / コントラクト（固定リンク付き） */}
+        <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ccc", borderRadius: 8 }}>
+          <div style={{ fontWeight: 600, marginBottom: "6px" }}>ウォレット接続</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button type="button" disabled={connecting} onClick={connectKeplr}>
+              {connected ? "再接続" : "Keplrに接続"}
+            </button>
+            <div style={{ fontSize: 12, color: "#666" }}>
+              Chain: <b>{CHAIN_NAME}</b> ({CHAIN_ID}) {rpcUrlUsed ? `— RPC: ${rpcUrlUsed}` : ""}
             </div>
           </div>
+          <div style={{ marginTop: 6, fontSize: 13 }}>
+            送信者（Owner）:
+            <input
+              style={{ width: "100%" }}
+              placeholder="例: neutron1..."
+              value={owner}
+              onChange={(e) => setOwner(e.target.value)}
+            />
+          </div>
+          <div style={{ marginTop: 6, fontSize: 13 }}>
+            コントラクトアドレス（固定）:{" "}
+            <a href={CONTRACT_EXPLORER_URL} target="_blank" rel="noreferrer">
+              <code>{CONTRACT_ADDR}</code>
+            </a>
+          </div>
+        </div>
 
-          {/* 観測ペイロード */}
-          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #eee", borderRadius: 8, background: "#fafafa" }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>観測ペイロード</div>
-            <div style={{ display: "grid", gap: 12 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <div>
-                  観測日時:
-                  <input
-                    type="datetime-local"
-                    value={toLocalDatetimeInputValue(observedAtSec)}
-                    onChange={(e) => setObservedAtSec(parseLocalDatetimeInputValue(e.target.value))}
-                    style={{ width: "100%" }}
-                  />
-                  <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
-                    UNIX秒: {observedAtSec} <button type="button" onClick={() => setObservedAtSec(nowUnixSec())}>現在時刻</button>
-                  </div>
-                </div>
-                <div>
-                  生育状態（life_status）:
-                  <select value={lifeStatus} onChange={(e) => setLifeStatus(e.target.value)}>
-                    <option value="野生">野生</option>
-                    <option value="栽培">栽培</option>
-                    <option value="植栽">植栽</option>
-                    <option value="その他">その他</option>
-                  </select>
-                  {lifeStatus === "その他" && (
-                    <input
-                      style={{ width: "100%", marginTop: 6 }}
-                      placeholder="例: 半栽培・保全区域内 等"
-                      value={lifeStatusDetail}
-                      onChange={(e) => setLifeStatusDetail(e.target.value)}
-                    />
-                  )}
+        {/* 観測ペイロード */}
+        <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ccc", borderRadius: 8 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>観測ペイロード</div>
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                観測日時:
+                <input
+                  type="datetime-local"
+                  value={toLocalDatetimeInputValue(observedAtSec)}
+                  onChange={(e) => setObservedAtSec(parseLocalDatetimeInputValue(e.target.value))}
+                  style={{ width: "100%" }}
+                />
+                <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+                  UNIX秒: {observedAtSec} <button type="button" onClick={() => setObservedAtSec(nowUnixSec())}>現在時刻</button>
                 </div>
               </div>
-
               <div>
-                学名（species.scientific）:
-                <input
-                  style={{ width: "100%" }}
-                  placeholder="例: Prunus mume"
-                  value={speciesScientific}
-                  onChange={(e) => setSpeciesScientific(e.target.value)}
-                />
-              </div>
-              <div>
-                和名（species.vernacular_ja）:
-                <input
-                  style={{ width: "100%" }}
-                  placeholder="例: ウメ"
-                  value={nameJa}
-                  onChange={(e) => setNameJa(e.target.value)}
-                />
-              </div>
-
-              <div>
-                カテゴリ（category）:
-                <select value={category} onChange={(e) => setCategory(e.target.value)}>
-                  <option value="" disabled>選択してください</option>
-                  <option value="不明">不明</option>
-                  <option value="鳥類">鳥類</option>
-                  <option value="爬虫類または両生類">爬虫類または両生類</option>
-                  <option value="哺乳類">哺乳類</option>
-                  <option value="魚類">魚類</option>
-                  <option value="虫または甲殻類">虫または甲殻類</option>
-                  <option value="植物">植物</option>
-                  <option value="菌類（キノコなど）">菌類（キノコなど）</option>
+                生育状態（life_status）:
+                <select value={lifeStatus} onChange={(e) => setLifeStatus(e.target.value)}>
+                  <option value="野生">野生</option>
+                  <option value="飼育または栽培">飼育または栽培</option>
                   <option value="その他">その他</option>
                 </select>
-                {category === "その他" && (
+                {lifeStatus === "その他" && (
                   <input
                     style={{ width: "100%", marginTop: 6 }}
-                    placeholder="例: 原生生物・コケ植物 等"
-                    value={categoryDetail}
-                    onChange={(e) => setCategoryDetail(e.target.value)}
+                    placeholder="例: 半栽培・保全区域内 等"
+                    value={lifeStatusDetail}
+                    onChange={(e) => setLifeStatusDetail(e.target.value)}
                   />
                 )}
               </div>
+            </div>
 
-              <div>
-                備考（notes）:
-                <textarea
-                  rows={2}
-                  style={{ width: "100%" }}
-                  placeholder="例: 東京駅付近"
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
+            <div>
+              学名（species.scientific）:
+              <input
+                style={{ width: "100%" }}
+                placeholder="例: Prunus mume"
+                value={speciesScientific}
+                onChange={(e) => setSpeciesScientific(e.target.value)}
+              />
+            </div>
+            <div>
+              和名（species.vernacular_ja）:
+              <input
+                style={{ width: "100%" }}
+                placeholder="例: ウメ"
+                value={nameJa}
+                onChange={(e) => setNameJa(e.target.value)}
+              />
+            </div>
+
+            <div>
+              カテゴリ（category）:
+              <select value={category} onChange={(e) => setCategory(e.target.value)}>
+                <option value="" disabled>選択してください</option>
+                <option value="不明">不明</option>
+                <option value="鳥類">鳥類</option>
+                <option value="爬虫類または両生類">爬虫類または両生類</option>
+                <option value="哺乳類">哺乳類</option>
+                <option value="魚類">魚類</option>
+                <option value="虫または甲殻類">虫または甲殻類</option>
+                <option value="植物">植物</option>
+                <option value="菌類（キノコなど）">菌類（キノコなど）</option>
+                <option value="その他">その他</option>
+              </select>
+              {category === "その他" && (
+                <input
+                  style={{ width: "100%", marginTop: 6 }}
+                  placeholder="例: 原生生物・コケ植物 等"
+                  value={categoryDetail}
+                  onChange={(e) => setCategoryDetail(e.target.value)}
                 />
-              </div>
+              )}
+            </div>
 
-              {/* 場所（任意、空欄OK） */}
-              <div>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>場所（任意）</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8 }}>
-                  <input
-                    placeholder="緯度（度） 例: 35.681"
-                    value={latDeg}
-                    onChange={(e) => setLatDeg(e.target.value)}
-                  />
-                  <input
-                    placeholder="経度（度） 例: 139.767"
-                    value={lonDeg}
-                    onChange={(e) => setLonDeg(e.target.value)}
-                  />
-                  <button type="button" onClick={fillCurrentLocation}>現在地</button>
-                </div>
-                <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-                  ※ どちらかが空欄/不正なら <code>place</code> は送信に含めません（エラーになりません）。<br />
-                  送信値プレビュー: lat={latIntDisp} / lon={lonIntDisp}（度×1000）
-                </div>
-              </div>
+            <div>
+              備考（notes）:
+              <textarea
+                rows={2}
+                style={{ width: "100%" }}
+                placeholder="例: 東京駅付近"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+              />
+            </div>
 
-              {/* 追加メタデータ（追加のみ） */}
-              <div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ fontWeight: 600 }}>追加メタデータ（extras）</div>
-                  <button type="button" onClick={addExtra}>行を追加</button>
+            {/* 場所（任意、空欄OK） */}
+            <div>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>場所（任意）</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8 }}>
+                <input
+                  placeholder="緯度（度） 例: 35.681"
+                  value={latDeg}
+                  onChange={(e) => setLatDeg(e.target.value)}
+                />
+                <input
+                  placeholder="経度（度） 例: 139.767"
+                  value={lonDeg}
+                  onChange={(e) => setLonDeg(e.target.value)}
+                />
+                <button type="button" onClick={fillCurrentLocation}>現在地</button>
+              </div>
+              <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+                ※ どちらかが空欄/不正なら <code>place</code> は送信に含めません（エラーになりません）。<br />
+                送信値プレビュー: lat={latIntDisp} / lon={lonIntDisp}（度×1000）
+              </div>
+            </div>
+
+            {/* 追加メタデータ（追加のみ） */}
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ fontWeight: 600 }}>追加メタデータ（extras）</div>
+                <button type="button" onClick={addExtra}>行を追加</button>
+              </div>
+              {extras.map((e, idx) => (
+                <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, marginTop: 6 }}>
+                  <input placeholder="例: exif.camera_model" value={e.key} onChange={(ev) => updateExtra(idx, "key", ev.target.value)} />
+                  <input placeholder="例: Canon EOS R50" value={e.value} onChange={(ev) => updateExtra(idx, "value", ev.target.value)} />
+                  <button type="button" onClick={() => removeExtra(idx)}>削除</button>
                 </div>
-                {extras.map((e, idx) => (
-                  <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, marginTop: 6 }}>
-                    <input placeholder="例: exif.camera_model" value={e.key} onChange={(ev) => updateExtra(idx, "key", ev.target.value)} />
-                    <input placeholder="例: Canon EOS R50" value={e.value} onChange={(ev) => updateExtra(idx, "value", ev.target.value)} />
-                    <button type="button" onClick={() => removeExtra(idx)}>削除</button>
-                  </div>
-                ))}
-                <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-                  ※ ここで入力した要素は <code>payload.extras</code> に<b>追加</b>されます（既存を更新しません）。
-                </div>
+              ))}
+              <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+                ※ ここで入力した要素は <code>payload.extras</code> に<b>追加</b>されます（既存を更新しません）。
               </div>
             </div>
           </div>
+        </div>
 
-          {/* 画像 → IPFS（CID取得） */}
-          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: 8 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>画像 → IPFS（CID取得）</div>
+        {/* 画像 → IPFS（CID取得） */}
+        <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ccc", borderRadius: 8 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>画像 → IPFS（CID取得）</div>
 
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <button type="button" onClick={() => startCamera("environment")} disabled={cameraOpen}>カメラを起動（背面）</button>
-              <button type="button" onClick={() => document.getElementById("file-picker")?.click()} disabled={cameraOpen}>ファイルから選択</button>
-              <input id="file-picker" type="file" accept="image/*" onChange={onSelectFile} style={{ display: "none" }} />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <button type="button" onClick={() => startCamera("environment")} disabled={cameraOpen}>カメラを起動（背面）</button>
+            <button type="button" onClick={() => document.getElementById("file-picker")?.click()} disabled={cameraOpen}>ファイルから選択</button>
+            <input id="file-picker" type="file" accept="image/*" onChange={onSelectFile} style={{ display: "none" }} />
+          </div>
+
+          {preview && (
+            <div style={{ marginTop: 8 }}>
+              <img src={preview} alt="preview" style={{ objectFit: "cover", width: itemWidth, height: itemWidth, borderRadius: 4 }} />
             </div>
+          )}
 
+          <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+            {!preview && (<div style={{ fontWeight: "bold", color: "#b00020" }}>写真を撮影してください</div>)}
             {preview && (
-              <div style={{ marginTop: 8 }}>
-                <img src={preview} alt="preview" style={{ objectFit: "cover", width: itemWidth, height: itemWidth, borderRadius: 4 }} />
-              </div>
-            )}
-
-            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
               <button type="button" onClick={handleUploadToIPFS} disabled={uploading || !file}>
                 {uploading ? "アップロード中…" : "IPFSへアップロード（画像→CID）"}
               </button>
-              <div style={{ fontSize: 13 }}>
-                画像CID: {cidImage || "-"}
-              </div>
-              {uploadDiag && (
-                <div style={{ fontSize: 12, color: uploadDiag.ok ? "#2f7d32" : "#b00020" }}>
-                  {uploadDiag.ok
-                    ? <>アップロード成功（endpoint: <code>{uploadDiag.endpoint}</code>）</>
-                    : <>アップロード失敗: {uploadDiag.error}</>}
-                  {uploadDiag.detail && (
-                    <div style={{ marginTop: 4 }}>
-                      詳細: <code style={{ wordBreak: "break-all" }}>{JSON.stringify(uploadDiag.detail)}</code>
-                    </div>
-                  )}
-                </div>
-              )}
+            )}
+            <div style={{ fontSize: 13 }}>
+              画像CID: {cidImage || "-"}
             </div>
-          </div>
 
-          {/* 送信（execute store） */}
-          <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ddd", borderRadius: 8 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>コントラクトへ送信</div>
+            {uploadDiag && (
+              <div style={{ fontSize: 12, color: uploadDiag.ok ? "#2f7d32" : "#b00020" }}>
+                {uploadDiag.ok
+                  ? <>アップロード成功（endpoint: <code>{uploadDiag.endpoint}</code>）</>
+                  : <>アップロード失敗: {uploadDiag.error}</>}
+                {uploadDiag.detail && (
+                  <div style={{ marginTop: 4 }}>
+                    詳細: <code style={{ wordBreak: "break-all" }}>{JSON.stringify(uploadDiag.detail)}</code>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 送信（execute store） */}
+        <div style={{ margin: "8px 0", padding: "12px", border: "1px solid #ccc", borderRadius: 8 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>コントラクトへ送信</div>
+          {!cidImage && (<div style={{ fontWeight: "bold", color: "#b00020" }}>写真をアップロードしてください</div>)}
+          {cidImage && (
             <button type="button" onClick={handleStore} disabled={sending || !connected}>
               {sending ? "送信中…" : "store TX を送る"}
             </button>
-            <div style={{ fontSize: 13, marginTop: 8 }}>
-              TxHash: {txHash ? (<a href={formatTxLink(txHash)} target="_blank" rel="noreferrer">{txHash}</a>) : "-"}
-            </div>
-            <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-              ガス価格: {GAS_PRICE_NUM} {DENOM} / ガス調整: {GAS_ADJ}
+          )}
+          <div style={{ fontSize: 13, marginTop: 8 }}>
+            TxHash: {txHash ? (<a href={formatTxLink(txHash)} target="_blank" rel="noreferrer">{txHash}</a>) : "-"}
+          </div>
+          <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+            ガス価格: {GAS_PRICE_NUM} {DENOM} / ガス調整: {GAS_ADJ}
+          </div>
+        </div>
+
+        {/* 画像一覧 */}
+        <div style={{ margin: "8px 0" }}>
+          <div style={{ fontWeight: 600, margin: "0px 12px" }}>画像一覧<button type="button" onClick={listing} style={{margin: "0px 8px"}}>更新</button></div>
+          <div style={{ display: "flex", flexWrap: "wrap", width: clientWidth, padding: "8px" }}>
+            {items.map(item => (
+              <div key={item.id} style={{ position: "relative", margin: "8px", width: itemWidth, height: itemWidth }}>
+                <img style={{ objectFit: "cover", width: itemWidth, height: itemWidth }} src={('https://ipfs.yamada.jo.sus.ac.jp/ipfs/' + item.cid)} />
+                {item.mine && (<div style={{ position: "absolute", top: 0, left: 0, backgroundColor: "#c0c000", color: "#ffffff" }}>★</div>)}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* 最下部：最終メタデータ表示 */}
+        {!showPayload && (
+          <div style={{ padding: 12, background: "#fafafa", cursor: "pointer", userSelect: "none" }} role="button" onClick={() => setShowPayload(true)}>
+            <div style={{ fontWeight: 700 }}>最終メタデータ<span style={{ color: "#ABCE1C", fontWeight: "bold" }}>＋</span></div>
+          </div>
+        )}
+        {showPayload && (
+          <div style={{ padding: 12, background: "#fafafa" }}>
+            <div style={{ fontWeight: 700, marginBottom: 6, cursor: "pointer", userSelect: "none" }} role="button" onClick={() => setShowPayload(false)}>最終メタデータ（payload / 送信メッセージ）<span style={{ color: "#ABCE1C", fontWeight: "bold" }}>－</span></div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>payload</div>
+                <pre style={{ margin: 0, padding: 8, background: "#fff", border: "1px solid #eee", borderRadius: 6, overflow: "auto" }}>
+                  {JSON.stringify(finalPayload, null, 2)}
+                </pre>
+                <button type="button" onClick={() => copyJson(finalPayload)} style={{ marginTop: 6 }}>payload をコピー</button>
+              </div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>store メッセージ</div>
+                <pre style={{ margin: 0, padding: 8, background: "#fff", border: "1px solid #eee", borderRadius: 6, overflow: "auto" }}>
+                  {JSON.stringify(finalMsg, null, 2)}
+                </pre>
+                <button type="button" onClick={() => copyJson(finalMsg)} style={{ marginTop: 6 }}>メッセージをコピー</button>
+              </div>
             </div>
           </div>
+        )}
+      </div>
 
-          {message && (<div style={{ marginTop: 8, padding: 10, background: "#f3f7ea", border: "1px solid #ABCE1C", borderRadius: 6 }}>{message}</div>)}
-        </div>
+      {/* メッセージ */}
+      <div style={{ background: "#f3f7ea", border: "1px solid #ABCE1C", borderRadius: 6, zIndex: 9998, padding: 10 }}>
+        {!message && (<span>メッセージがある場合はここに表示されます</span>)}
+        {message && (<span>{message}</span>)}
       </div>
 
       {/* カメラオーバーレイ */}
@@ -861,27 +904,6 @@ export default function MintNFTPage() {
           </div>
         </div>
       )}
-
-      {/* 最下部：最終メタデータ表示 */}
-      <div style={{ padding: 12, borderTop: "2px solid #ABCE1C", background: "#fafafa" }}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>最終メタデータ（payload / 送信メッセージ）</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>payload</div>
-            <pre style={{ margin: 0, padding: 8, background: "#fff", border: "1px solid #eee", borderRadius: 6, overflow: "auto" }}>
-              {JSON.stringify(finalPayload, null, 2)}
-            </pre>
-            <button type="button" onClick={() => copyJson(finalPayload)} style={{ marginTop: 6 }}>payload をコピー</button>
-          </div>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>store メッセージ</div>
-            <pre style={{ margin: 0, padding: 8, background: "#fff", border: "1px solid #eee", borderRadius: 6, overflow: "auto" }}>
-              {JSON.stringify(finalMsg, null, 2)}
-            </pre>
-            <button type="button" onClick={() => copyJson(finalMsg)} style={{ marginTop: 6 }}>メッセージをコピー</button>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
