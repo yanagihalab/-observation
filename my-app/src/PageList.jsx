@@ -15,7 +15,7 @@ function PageList() {
         <li><Link to="/ipfs-upload">IPFS画像アップロード</Link></li>
         <li><Link to="/mint-nft">参加入場NFTの発行</Link></li>
         <li><Link to="/ipfs-upload-mint">観察記録</Link></li>
-        <li><Link to="/QrReaderPage_with_contract">e-QRcode</Link></li>
+        <li><Link to="/eQRpaper">eQRcode</Link></li>
         <li><Link to="/contract-test">コントラクトテストページ1</Link></li>
         <li><Link to="/all-contract-messages">コントラクトテストページ2</Link></li>
         <li><Link to="/ClimbingInfoViewer">トランザクション確認</Link></li>
