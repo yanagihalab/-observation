@@ -24,6 +24,8 @@ import IPFSUploadAndMintPage from "./IPFSUploadAndMintPage";
 
 // ★ 追加：Faucet ページ（import は既にありました）
 import FaucetPage from "./FaucetPage";
+import TxListTester from "./fetchContractTxs";
+import EQRpaper from "./eQRpaper_snap";
 
 function App() {
   return (
@@ -50,6 +52,8 @@ function App() {
       {/* （任意）従来の簡易ミント画面も残す場合 */}
       <Route path="/mint-nft" element={<MintNFTPage />} />
       <Route path="/faucet" element={<FaucetPage />} />
+      <Route path="/fetchContractTxs" element={<TxListTester/>} />
+      <Route path="/eQRpaper" element={<EQRpaper/>} />
     </Routes>
   );
 }
